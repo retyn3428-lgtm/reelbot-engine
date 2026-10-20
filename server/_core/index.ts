@@ -7,6 +7,7 @@ import { publicPlatformScript } from "./publicConfig";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { handleTelegramUpdate, telegramIsConfigured } from "../telegram";
 
 async function startServer() {
   const app = express();
@@ -15,6 +16,15 @@ async function startServer() {
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
+  app.get("/api/telegram/status", (_req, res) => {
+    res.json({ configured: telegramIsConfigured(), webhook: "/api/telegram/webhook" });
+  });
+  app.post("/api/telegram/webhook", (req, res) => {
+    res.sendStatus(200);
+    void handleTelegramUpdate(req.body).catch((error) => {
+      console.error("[Telegram] update handling failed:", error);
+    });
+  });
   app.get("/manus-routes.json", (_req, res) => {
     res.type("application/json").json({
       routes: [
