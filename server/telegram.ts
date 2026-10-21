@@ -6,7 +6,7 @@ import { basename, join } from "node:path";
 type TelegramChat = { id: number };
 type TelegramDocument = { file_id: string; file_name?: string; mime_type?: string };
 type TelegramVideo = { file_id: string; file_name?: string; duration?: number; mime_type?: string };
-type TelegramMessage = { message_id: number; chat: TelegramChat; text?: string; video?: TelegramVideo; document?: TelegramDocument };
+type TelegramMessage = { message_id: number; chat: TelegramChat; from?: { id: number }; text?: string; video?: TelegramVideo; document?: TelegramDocument };
 type TelegramCallbackQuery = { id: string; data?: string; message?: TelegramMessage };
 type TelegramUpdate = { update_id: number; message?: TelegramMessage; callback_query?: TelegramCallbackQuery };
 type SpeechSegment = { start: number; end: number; text: string };
@@ -19,6 +19,12 @@ const sessions = new Map<number, Session>();
 const queue: QueueJob[] = [];
 
 function getToken() { return process.env.TELEGRAM_BOT_TOKEN ?? ""; }
+function getAllowedUserId() { return Number(process.env.ALLOWED_TELEGRAM_USER_ID ?? "0"); }
+function isAllowedUser(update: TelegramUpdate) {
+  const userId = update.message?.from?.id ?? update.callback_query?.message?.from?.id ?? 0;
+  const allowedUserId = getAllowedUserId();
+  return allowedUserId > 0 && userId === allowedUserId;
+}
 function getSession(chatId: number): Session {
   const existing = sessions.get(chatId);
   if (existing) return existing;
@@ -227,6 +233,11 @@ async function handleCallback(query: TelegramCallbackQuery) {
 }
 
 export async function handleTelegramUpdate(update: TelegramUpdate) {
+  if (!isAllowedUser(update)) {
+    const chatId = update.message?.chat.id ?? update.callback_query?.message?.chat.id;
+    if (chatId) await sendTelegramMessage(chatId, "Этот бот закрытый.");
+    return;
+  }
   if (update.callback_query) { await handleCallback(update.callback_query); return; }
   const message = update.message; if (!message) return; const chatId = message.chat.id; const text = (message.text ?? "").trim().toLowerCase();
   if (text === "/start" || text === "/help") { newSession(chatId, "idle"); await sendTelegramMessage(chatId, "Привет! Я ReelBot. Я могу принять референс и исходники, сделать настоящий вертикальный монтаж с расшифровкой и субтитрами.", startKeyboard()); return; }
