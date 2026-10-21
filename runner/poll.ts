@@ -1,26 +1,51 @@
-import { handleTelegramUpdate } from "../server/telegram";
+import { processRenderJob, type RenderJob } from "../server/telegram";
 
-type Update = { update_id: number; [key: string]: unknown };
+type JsonResponse<T> = { ok?: boolean; job?: T | null; error?: string };
+
 const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
+const base = (process.env.REELBOT_GATEWAY_URL ?? "").replace(/\/$/, "");
 if (!token) throw new Error("TELEGRAM_BOT_TOKEN is required");
-const api = (method: string) => `https://api.telegram.org/bot${token}/${method}`;
+if (!base) throw new Error("REELBOT_GATEWAY_URL is required");
 
-async function call<T>(method: string, body: Record<string, unknown> = {}) {
-  const response = await fetch(api(method), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  const payload = (await response.json()) as { ok?: boolean; result?: T; description?: string };
-  if (!response.ok || !payload.ok) throw new Error(`${method}: ${payload.description ?? response.statusText}`);
-  return payload.result as T;
+async function post<T>(path: string, body: unknown = {}): Promise<T> {
+  const response = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  let payload: JsonResponse<T> = {};
+  try { payload = (await response.json()) as JsonResponse<T>; } catch { /* handled below */ }
+  if (!response.ok) throw new Error(payload.error || `Gateway returned HTTP ${response.status}`);
+  return payload as T;
 }
 
-await call("deleteWebhook", { drop_pending_updates: false });
-console.log("[runner] polling mode enabled");
-let offset = 0;
-const deadline = Date.now() + 4 * 60 * 1000;
-while (Date.now() < deadline) {
-  const updates = await call<Update[]>("getUpdates", { offset, timeout: 20, allowed_updates: ["message", "callback_query"] });
-  for (const update of updates) {
-    offset = Math.max(offset, update.update_id + 1);
-    await handleTelegramUpdate(update as never);
+// Ensure the Telegram webhook is configured through Cloudflare. The token never appears in logs.
+await post("/runner/activate");
+const result = await post<{ job: RenderJob | null }>("/runner/next");
+const job = result.job;
+if (!job) {
+  console.log("[runner] Idle: no render jobs are queued.");
+} else {
+  console.log("[runner] A render job was claimed.");
+  try {
+    await processRenderJob(job);
+    await post("/runner/complete", { jobId: job.id });
+    console.log("[runner] Render job completed.");
+  } catch (error) {
+    const safeMessage = error instanceof Error ? error.message.slice(0, 2500) : "unknown rendering error";
+    try {
+      await post("/runner/fail", {
+        jobId: job.id,
+        error: safeMessage,
+        userMessage: "Возникла техническая ошибка при обработке. Исходники не удалены из чата — попробуй один файл до 20 МБ. Если ошибка повторится, напиши «собери» ещё раз после /new.",
+      });
+    } catch {
+      // Keep private job details and credentials out of public GitHub Actions logs.
+      console.error("[runner] Could not report the render failure to Telegram.");
+    }
+    console.error("[runner] Render job failed; details were not written to public logs.");
   }
 }
-console.log("[runner] polling window finished");

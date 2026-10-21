@@ -8,13 +8,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: reelbot-runner
+  cancel-in-progress: false
+
 jobs:
   poll-and-render:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -24,21 +30,34 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - name: Install ffmpeg and Whisper
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          python3 -m pip install --user --upgrade openai-whisper
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache Whisper packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: whisper-pip-${{ runner.os }}-py311-v1
       - name: Cache Whisper model
         uses: actions/cache@v4
         with:
           path: ~/.cache/whisper
           key: whisper-tiny-v1
+      - name: Ensure FFmpeg is installed
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+      - name: Install Whisper
+        run: python3 -m pip install --user --upgrade --cache-dir "$HOME/.cache/pip" openai-whisper
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Poll Telegram and render videos
+      - name: Claim one render job through the private Worker gateway
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          REELBOT_GATEWAY_URL: https://reelbot-gateway.retyn-reelbot.workers.dev
           WHISPER_MODEL: tiny
           NODE_ENV: production
         run: pnpm exec tsx runner/poll.ts

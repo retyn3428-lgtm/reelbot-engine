@@ -101,6 +101,12 @@ jspm_packages/
 tmp/
 temp/
 
+# Private user media: never commit Telegram inputs or rendered output
+*.mp4
+*.mov
+*.m4a
+*.wav
+
 # Database
 *.db
 *.sqlite

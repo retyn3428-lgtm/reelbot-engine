@@ -1,111 +1,111 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
-type TelegramChat = { id: number };
-type TelegramDocument = { file_id: string; file_name?: string; mime_type?: string };
-type TelegramVideo = { file_id: string; file_name?: string; duration?: number; mime_type?: string };
-type TelegramMessage = { message_id: number; chat: TelegramChat; from?: { id: number }; text?: string; video?: TelegramVideo; document?: TelegramDocument };
-type TelegramCallbackQuery = { id: string; data?: string; message?: TelegramMessage };
-type TelegramUpdate = { update_id: number; message?: TelegramMessage; callback_query?: TelegramCallbackQuery };
 type SpeechSegment = { start: number; end: number; text: string };
-type SessionFile = { fileId: string; name: string };
-type Session = { stage: "idle" | "awaiting_reference" | "awaiting_sources" | "ready"; reference?: SessionFile; sources: SessionFile[]; createdAt: number };
-type QueueJob = { id: string; chatId: number; sourceCount: number; hasReference: boolean; status: "queued" | "analyzing" | "ready" | "failed"; createdAt: number };
+export type RenderSource = { fileId: string; name: string };
+export type RenderJob = { id: string; chatId: number; sources: RenderSource[] };
 
-type TelegramFile = { file_path?: string };
-const sessions = new Map<number, Session>();
-const queue: QueueJob[] = [];
+type WorkerResponse = { ok?: boolean; error?: string; description?: string };
 
-function getToken() { return process.env.TELEGRAM_BOT_TOKEN ?? ""; }
-function getAllowedUserId() { return Number(process.env.ALLOWED_TELEGRAM_USER_ID ?? "[OWNER_ID_REDACTED]"); }
-function isAllowedUser(update: TelegramUpdate) {
-  const userId = update.message?.from?.id ?? update.callback_query?.message?.from?.id ?? 0;
-  const allowedUserId = getAllowedUserId();
-  return allowedUserId > 0 && userId === allowedUserId;
+function workerUrl() {
+  const value = process.env.REELBOT_GATEWAY_URL;
+  if (!value) throw new Error("REELBOT_GATEWAY_URL is not configured");
+  return value.replace(/\/$/, "");
 }
-function getSession(chatId: number): Session {
-  const existing = sessions.get(chatId);
-  if (existing) return existing;
-  const fresh: Session = { stage: "idle", sources: [], createdAt: Date.now() };
-  sessions.set(chatId, fresh);
-  return fresh;
-}
-function keyboard(rows: Array<Array<{ text: string; callback_data: string }>>) { return { inline_keyboard: rows }; }
 
-async function telegramApi<T>(method: string, body: Record<string, unknown>): Promise<T | null> {
-  const token = getToken();
-  if (!token) { console.warn("[Telegram] TELEGRAM_BOT_TOKEN is not configured"); return null; }
-  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+function authHeaders(extra?: HeadersInit) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) throw new Error("TELEGRAM_BOT_TOKEN is required for the private runner");
+  const headers = new Headers(extra);
+  headers.set("authorization", `Bearer ${token}`);
+  return headers;
+}
+
+async function workerJson(path: string, body: unknown): Promise<WorkerResponse> {
+  const response = await fetch(`${workerUrl()}${path}`, {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify(body),
   });
-  const payload = (await response.json()) as { ok?: boolean; result?: T; description?: string };
-  if (!response.ok || !payload.ok) {
-    console.error(`[Telegram] ${method} failed: ${payload.description ?? response.statusText}`);
-    return null;
-  }
-  return payload.result ?? null;
+  let payload: WorkerResponse = {};
+  try { payload = (await response.json()) as WorkerResponse; } catch { /* handled below */ }
+  if (!response.ok) throw new Error(payload.error || `Worker proxy returned HTTP ${response.status}`);
+  return payload;
 }
 
-export async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: ReturnType<typeof keyboard>) {
-  return telegramApi("sendMessage", { chat_id: chatId, text, disable_web_page_preview: true, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
+async function sendTelegramMessage(chatId: number, text: string) {
+  await workerJson("/runner/message", { chatId, text });
 }
+
+async function downloadTelegramFile(fileId: string, dir: string, name: string) {
+  const response = await fetch(`${workerUrl()}/runner/file`, {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ fileId }),
+  });
+  if (!response.ok || !response.body) {
+    let reason = "Не удалось скачать видео через защищённый шлюз Telegram.";
+    try { reason = ((await response.json()) as WorkerResponse).error || reason; } catch { /* no body */ }
+    throw new Error(reason);
+  }
+  const safeName = basename(name || "video.mp4").replace(/[^a-zA-Z0-9._-]/g, "_");
+  const output = join(dir, `${Date.now()}-${safeName}`);
+  await writeFile(output, new Uint8Array(await response.arrayBuffer()));
+  return output;
+}
+
 async function sendTelegramVideo(chatId: number, filePath: string, caption: string) {
-  const token = getToken();
   const data = await readFile(filePath);
+  if (data.byteLength > 49 * 1024 * 1024) throw new Error("Готовый ролик превышает лимит отправки Telegram 49 МБ.");
   const form = new FormData();
   form.append("chat_id", String(chatId));
-  form.append("supports_streaming", "true");
   form.append("caption", caption);
   form.append("video", new Blob([new Uint8Array(data)], { type: "video/mp4" }), basename(filePath));
-  const response = await fetch(`https://api.telegram.org/bot${token}/sendVideo`, { method: "POST", body: form });
-  const payload = (await response.json()) as { ok?: boolean; description?: string };
-  if (!response.ok || !payload.ok) throw new Error(payload.description ?? "Telegram не принял готовое видео");
+  const response = await fetch(`${workerUrl()}/runner/video`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: form,
+  });
+  let payload: WorkerResponse = {};
+  try { payload = (await response.json()) as WorkerResponse; } catch { /* handled below */ }
+  if (!response.ok) throw new Error(payload.error || "Telegram не принял готовое видео.");
 }
-async function answerCallback(id: string) { await telegramApi("answerCallbackQuery", { callback_query_id: id }); }
 
-function fileFromMessage(message: TelegramMessage): SessionFile | null {
-  if (message.video) return { fileId: message.video.file_id, name: message.video.file_name ?? "video.mp4" };
-  if (message.document?.mime_type?.startsWith("video/")) return { fileId: message.document.file_id, name: message.document.file_name ?? "video.mp4" };
-  return null;
-}
-function startKeyboard() { return keyboard([[{ text: "Новый монтаж", callback_data: "new_project" }], [{ text: "Моя очередь", callback_data: "queue" }, { text: "Как это работает", callback_data: "help" }]]); }
-function referenceKeyboard() { return keyboard([[{ text: "Добавить референс", callback_data: "reference" }], [{ text: "Без референса", callback_data: "skip_reference" }]]); }
-function sourceKeyboard() { return keyboard([[{ text: "Добавить ещё видео", callback_data: "more_sources" }], [{ text: "Собрать готовый ролик", callback_data: "render_preview" }], [{ text: "Отменить проект", callback_data: "cancel_project" }]]); }
-function inputChoiceKeyboard() { return keyboard([[{ text: "Сразу отправить мои видео", callback_data: "sources_first" }], [{ text: "Сначала добавить референс", callback_data: "reference" }]]); }
-function newSession(chatId: number, stage: Session["stage"]): Session { const session: Session = { stage, sources: [], createdAt: Date.now() }; sessions.set(chatId, session); return session; }
-
-function run(command: string, args: string[], cwd?: string) {
+function run(command: string, args: string[]) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(command, args, { cwd });
-    let stdout = ""; let stderr = "";
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
     child.on("error", reject);
-    child.on("close", (code) => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`${command} завершился с кодом ${code}: ${stderr.slice(-1200)}`)));
+    child.on("close", (code) => code === 0
+      ? resolve({ stdout, stderr })
+      : reject(new Error(`${command} завершился с кодом ${code}: ${stderr.slice(-1000)}`)));
   });
 }
 
 function assTime(seconds: number) {
-  const safe = Math.max(0, seconds); const h = Math.floor(safe / 3600); const m = Math.floor((safe % 3600) / 60); const s = safe % 60;
+  const safe = Math.max(0, seconds);
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = safe % 60;
   return `${h}:${String(m).padStart(2, "0")}:${s.toFixed(2).padStart(5, "0")}`;
 }
-function assText(text: string) { return text.replace(/[{}\\]/g, "").replace(/\n/g, "\\N").trim(); }
-function makeAss(segments: SpeechSegment[]) {
-  const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Reel,DejaVu Sans,58,&H00FFFFFF,&H00FFFFFF,&H00171717,&H7A171717,-1,0,0,0,100,100,0,0,3,18,0,2,90,90,430,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
-  const events = segments.filter((segment) => segment.text.trim()).map((segment) => `Dialogue: 0,${assTime(segment.start)},${assTime(segment.end)},Reel,,0,0,0,,${assText(segment.text)}`).join("\n");
-  return header + events + "\n";
+
+function assText(text: string) {
+  return text.replace(/[{}\\]/g, "").replace(/\n/g, "\\N").trim();
 }
 
-async function downloadTelegramFile(fileId: string, dir: string, name: string) {
-  const file = await telegramApi<TelegramFile>("getFile", { file_id: fileId });
-  if (!file?.file_path) throw new Error("Telegram не вернул путь к видео. Возможно, файл слишком большой для обычного Bot API (лимит скачивания 20 МБ).");
-  const response = await fetch(`https://api.telegram.org/file/bot${getToken()}/${file.file_path}`);
-  if (!response.ok || !response.body) throw new Error("Не удалось скачать видео из Telegram");
-  const output = join(dir, `${Date.now()}-${basename(name).replace(/[^a-zA-Z0-9._-]/g, "_")}`);
-  await writeFile(output, new Uint8Array(await response.arrayBuffer()));
-  return output;
+function makeAss(segments: SpeechSegment[]) {
+  const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Reel,DejaVu Sans,58,&H00FFFFFF,&H00FFFFFF,&H00171717,&H7A171717,-1,0,0,0,100,100,0,0,3,18,0,2,90,90,430,1\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n`;
+  const events = segments
+    .filter((segment) => segment.text.trim())
+    .map((segment) => `Dialogue: 0,${assTime(segment.start)},${assTime(segment.end)},Reel,,0,0,0,,${assText(segment.text)}`)
+    .join("\n");
+  return `${header}${events}\n`;
 }
 
 async function transcribe(videoPath: string): Promise<SpeechSegment[]> {
@@ -164,92 +164,35 @@ async function renderVideo(inputPath: string, segments: SpeechSegment[], dir: st
   const assPath = join(dir, "captions.ass");
   await writeFile(assPath, makeAss(segments), "utf8");
   const output = join(dir, "reelbot-result.mp4");
-  const subtitleFilter = `subtitles=${assPath}`;
   const vertical = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1166:2074,crop=1080:1920";
-  await run("ffmpeg", ["-y", "-i", inputPath, "-vf", `${vertical},${subtitleFilter}`, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output]);
+  await run("ffmpeg", ["-y", "-i", inputPath, "-vf", `${vertical},subtitles=${assPath}`, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output]);
   return output;
 }
 
-async function renderJob(job: QueueJob, session: Session) {
+async function compressForTelegram(path: string) {
+  const current = await stat(path);
+  if (current.size <= 45 * 1024 * 1024) return path;
+  const compressed = `${path}.720.mp4`;
+  await run("ffmpeg", ["-y", "-i", path, "-vf", "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280", "-c:v", "libx264", "-preset", "veryfast", "-b:v", "1800k", "-maxrate", "2M", "-bufsize", "4M", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", compressed]);
+  if ((await stat(compressed)).size > 49 * 1024 * 1024) throw new Error("После сжатия ролик всё ещё превышает лимит Telegram 49 МБ. Нужны более короткие исходники.");
+  return compressed;
+}
+
+export async function processRenderJob(job: RenderJob) {
+  if (!job?.id || !job.chatId || !Array.isArray(job.sources) || !job.sources.length) throw new Error("В задаче нет корректного списка исходных видео.");
   const dir = await mkdtemp(join(tmpdir(), "reelbot-"));
   try {
-    job.status = "analyzing";
-    await sendTelegramMessage(job.chatId, `Начинаю настоящий монтаж ${job.id}.\nСкачиваю ${job.sourceCount} исходник(а), убираю лишнее и готовлю субтитры.`);
+    await sendTelegramMessage(job.chatId, `Начинаю монтаж ${job.id}. Скачиваю ${job.sources.length} исходник(а), делаю вертикальный MP4, удаляю длинные паузы и добавляю русские субтитры.`);
     const paths: string[] = [];
-    for (const source of session.sources) paths.push(await downloadTelegramFile(source.fileId, dir, source.name));
+    for (const source of job.sources) paths.push(await downloadTelegramFile(source.fileId, dir, source.name));
     const joined = await concatSources(paths, dir);
     const cleaned = await removeLongPauses(joined, dir);
     const segments = await transcribe(cleaned);
-    await sendTelegramMessage(job.chatId, `Речь расшифрована: ${segments.filter((item) => item.text.trim()).length} смысловых фрагмента. Накладываю субтитры и собираю вертикальный MP4.`);
-    const output = await renderVideo(cleaned, segments, dir);
-    await sendTelegramVideo(job.chatId, output, `${job.id} готов. Стиль: стекло + динамические фразы + punch-in.`);
-    job.status = "ready";
-    await sendTelegramMessage(job.chatId, "Готово. Это первая реальная версия рендера. Следом добавлю выбор всех пресетов, референсный зум, цветокоррекцию, OneDrive и Dropbox.", startKeyboard());
-  } catch (error) {
-    job.status = "failed";
-    const message = error instanceof Error ? error.message : "неизвестная ошибка обработки";
-    console.error(`[ReelBot] ${job.id} failed:`, error);
-    await sendTelegramMessage(job.chatId, `Не удалось собрать ${job.id}: ${message}\n\nПопробуй короткое видео до 20 МБ — это ограничение стандартного скачивания Telegram Bot API.`);
+    await sendTelegramMessage(job.chatId, `Речь расшифрована. Готовлю субтитры и финальный файл (${segments.filter((item) => item.text.trim()).length} фрагментов).`);
+    const rendered = await renderVideo(cleaned, segments, dir);
+    const output = await compressForTelegram(rendered);
+    await sendTelegramVideo(job.chatId, output, `${job.id} готов. Вертикальный формат, субтитры и нормализация звука.`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 }
-
-async function showQueue(chatId: number) {
-  const ownJobs = queue.filter((job) => job.chatId === chatId).slice(-5).reverse();
-  if (!ownJobs.length) { await sendTelegramMessage(chatId, "Очередь пока пустая. Нажми «Новый монтаж», чтобы начать.", startKeyboard()); return; }
-  const status = (job: QueueJob) => job.status === "queued" ? "ожидает" : job.status === "analyzing" ? "монтируется" : job.status === "ready" ? "готово" : "ошибка";
-  await sendTelegramMessage(chatId, `Твоя очередь:\n\n${ownJobs.map((job) => `• ${job.id} — ${status(job)} · ${job.sourceCount} исходн.`).join("\n")}`, startKeyboard());
-}
-
-async function enqueuePreview(chatId: number) {
-  const session = getSession(chatId);
-  if (!session.sources.length) { await sendTelegramMessage(chatId, "Сначала пришли хотя бы одно исходное видео.", sourceKeyboard()); return; }
-  const job: QueueJob = { id: `RB-${String(queue.length + 1).padStart(3, "0")}`, chatId, sourceCount: session.sources.length, hasReference: Boolean(session.reference), status: "queued", createdAt: Date.now() };
-  queue.push(job); session.stage = "ready";
-  await sendTelegramMessage(chatId, `Принято. ${job.id} запускается в обработку. Можно закрыть Telegram — я верну готовое видео сюда.`, startKeyboard());
-  void renderJob(job, { ...session, sources: [...session.sources] });
-}
-
-async function handleCallback(query: TelegramCallbackQuery) {
-  await answerCallback(query.id); const chatId = query.message?.chat.id; if (!chatId) return;
-  switch (query.data) {
-    case "new_project": newSession(chatId, "awaiting_sources"); await sendTelegramMessage(chatId, "Начинаем. По умолчанию первое видео — твоё исходное. Просто отправь его, а потом нажми «Собрать готовый ролик». Если хочешь сначала показать пример стиля, выбери кнопку ниже.", inputChoiceKeyboard()); return;
-    case "sources_first": getSession(chatId).stage = "awaiting_sources"; await sendTelegramMessage(chatId, "Хорошо. Отправляй свои исходные видео — можно несколько подряд.", sourceKeyboard()); return;
-    case "reference": getSession(chatId).stage = "awaiting_reference"; await sendTelegramMessage(chatId, "Пришли видео, с которого взять стиль субтитров, зум или цветокоррекцию."); return;
-    case "skip_reference": newSession(chatId, "awaiting_sources"); await sendTelegramMessage(chatId, "Референс пропускаем. Теперь пришли исходные видео.", sourceKeyboard()); return;
-    case "more_sources": getSession(chatId).stage = "awaiting_sources"; await sendTelegramMessage(chatId, "Пришли следующий исходник. Когда закончишь, нажми «Собрать готовый ролик»." ); return;
-    case "render_preview": await enqueuePreview(chatId); return;
-    case "cancel_project": newSession(chatId, "idle"); await sendTelegramMessage(chatId, "Проект отменён.", startKeyboard()); return;
-    case "queue": await showQueue(chatId); return;
-    case "help": await sendTelegramMessage(chatId, "1. Пришли референс или пропусти.\n2. Пришли свои исходники.\n3. Нажми «Собрать готовый ролик».\nСейчас бот реально скачивает видео, расшифровывает речь, вшивает субтитры, делает вертикальный формат и возвращает MP4.", startKeyboard()); return;
-  }
-}
-
-export async function handleTelegramUpdate(update: TelegramUpdate) {
-  if (!isAllowedUser(update)) {
-    const chatId = update.message?.chat.id ?? update.callback_query?.message?.chat.id;
-    if (chatId) await sendTelegramMessage(chatId, "Этот бот закрытый.");
-    return;
-  }
-  if (update.callback_query) { await handleCallback(update.callback_query); return; }
-  const message = update.message; if (!message) return; const chatId = message.chat.id; const text = (message.text ?? "").trim().toLowerCase();
-  if (text === "/start" || text === "/help") { newSession(chatId, "idle"); await sendTelegramMessage(chatId, "Привет! Я ReelBot. Я могу принять референс и исходники, сделать настоящий вертикальный монтаж с расшифровкой и субтитрами.", startKeyboard()); return; }
-  if (text === "/queue" || text.includes("очеред")) { await showQueue(chatId); return; }
-  if ((text.includes("собери") || text.includes("сделай ролик") || text.includes("монтируй") || text === "готово" || text === "/render") && getSession(chatId).sources.length) { await enqueuePreview(chatId); return; }
-  if (text.includes("новый монтаж") || text === "/new") { newSession(chatId, "awaiting_sources"); await sendTelegramMessage(chatId, "Начинаем. По умолчанию первое видео — твоё исходное. Просто отправь его. Если сначала хочешь показать пример стиля, нажми «Сначала добавить референс».", inputChoiceKeyboard()); return; }
-  if (text.includes("референс") && !text.includes("без")) { getSession(chatId).stage = "awaiting_reference"; await sendTelegramMessage(chatId, "Пришли видео-референс. После него я попрошу твои исходники."); return; }
-  if (text.includes("без референса") || text.includes("пропустить")) { newSession(chatId, "awaiting_sources"); await sendTelegramMessage(chatId, "Референс пропускаем. Пришли исходные видео.", sourceKeyboard()); return; }
-  const file = fileFromMessage(message);
-  if (file) {
-    const session = getSession(chatId);
-    if (session.stage === "awaiting_reference") { session.reference = file; session.stage = "awaiting_sources"; await sendTelegramMessage(chatId, `Референс принят: ${file.name}. Теперь пришли исходники.`, sourceKeyboard()); return; }
-    if (session.stage === "awaiting_sources" || session.stage === "ready") { session.sources.push(file); session.stage = "awaiting_sources"; await sendTelegramMessage(chatId, `Исходник принят: ${file.name}. Всего: ${session.sources.length}.\n\nЕсли это все видео, нажми «Собрать готовый ролик» или напиши «собери».`, sourceKeyboard()); return; }
-    await sendTelegramMessage(chatId, "Нажми «Новый монтаж», чтобы я понял, это референс или исходник.", startKeyboard()); return;
-  }
-  await sendTelegramMessage(chatId, "Выбери действие кнопками ниже.", startKeyboard());
-}
-
-export async function getTelegramBotInfo() { return telegramApi<{ id: number; is_bot: boolean; first_name: string; username?: string }>("getMe", {}); }
-export async function setTelegramWebhook(webhookUrl: string) { return telegramApi<boolean>("setWebhook", { url: webhookUrl, drop_pending_updates: false }); }
-export function telegramIsConfigured() { return Boolean(getToken()); }

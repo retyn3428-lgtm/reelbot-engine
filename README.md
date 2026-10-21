@@ -1,18 +1,32 @@
-# ReelBot — облачный монтаж видео
+# ReelBot
 
-React / Express / tRPC / Drizzle starter, adapted from the Sandbox web-db-user template.
+ReelBot принимает видео в Telegram и собирает вертикальный MP4 с русскими субтитрами, удалением длинных пауз и нормализацией звука. Исходный код репозитория публичный; Telegram-бот закрыт allowlist владельца.
 
-- `pnpm dev`: development server; honors `PORT` (default 3000).
-- `pnpm build` / `pnpm start`: build and serve `dist/index.js` and `dist/public/`.
-- `pnpm db:migrate`: apply checked-in migrations. `pnpm db:push`: generate and apply new schema changes.
-- `pnpm check` / `pnpm test`: types and application tests.
+## Архитектура
 
-Start with the Webdev skill's default-template guide. Platform login, storage, payments and service contracts live in its shared references; read the relevant capability before extending its helper.
+Cloudflare Worker принимает Telegram webhook и сохраняет в KV только состояние проекта, Telegram file IDs и очередь задач. Само видео не кладётся в KV, Cloudflare R2 или GitHub: GitHub Actions получает его через закрытый Worker proxy, обрабатывает во временной файловой системе runner и отправляет готовый ролик обратно в Telegram. Временные файлы удаляются после обработки.
 
-`server/_core/publicConfig.ts` exposes only named public runtime values. Private keys stay server-side. The platform serves managed `/manus-storage/` assets; the application does not register a second proxy.
+GitHub Actions запускает один runner по расписанию раз в пять минут и также поддерживает ручной запуск. Telegram API вызывается из Cloudflare Worker, поэтому runner не использует конкурирующий Telegram long polling и не отключает webhook. В Actions задана последовательная очередь запусков и только разрешение `contents: read`.
 
-## Closed Telegram mode
+## Секреты и доступ
 
-The Telegram handler is fail-closed: it processes updates only when `ALLOWED_TELEGRAM_USER_ID` matches the sender's numeric Telegram user ID. This repository defaults that allowlist to `[OWNER_ID_REDACTED]`; deployments may override it with `ALLOWED_TELEGRAM_USER_ID`. Keep `TELEGRAM_BOT_TOKEN` in the hosting provider's secret store; never commit it to this repository.
+Никогда не добавляйте в репозиторий bot token, Telegram user ID, webhook secret, Telegram file IDs, видео или готовые ролики. Нужны следующие секреты:
 
-Platform configuration is readable and editable through `webdev.config`. Default settings are initial values, not enforced constraints. The agent may modify the files, commands and configuration or follow the flexible guide for another stack.
+- Cloudflare Worker secrets: `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_ID` и `TELEGRAM_WEBHOOK_SECRET`.
+- GitHub Actions secret: `TELEGRAM_BOT_TOKEN`.
+- Cloudflare KV binding: `STATE`.
+
+Значения секретов должны задаваться в интерфейсах соответствующих провайдеров; их не нужно помещать в исходный код или Actions-логи. Worker принимает только Telegram webhook с правильным secret header, а внутренние runner endpoints требуют авторизации bot token. Пользователи вне allowlist не могут поставить монтажную задачу.
+
+## Ограничения бесплатного режима
+
+Расписание GitHub Actions может запускаться с задержкой; пять минут — интервал проверки, а не обещание мгновенного ответа. Доступность и бесплатные лимиты зависят от правил GitHub, Cloudflare и Telegram и не являются безлимитной гарантией. В стандартном Telegram Bot API входное видео ограничено 20 МБ; ролик для отправки сжимается до лимита около 49 МБ. Тяжёлые видео могут обрабатываться несколько минут.
+
+## Разработка
+
+- `pnpm install --frozen-lockfile` — установить зависимости.
+- `pnpm check` — проверить типы.
+- `pnpm test` — запустить тесты.
+- `pnpm dev` — запустить web-приложение в режиме разработки.
+
+Публичность этого репозитория относится только к исходному коду. Секреты Cloudflare/GitHub и пользовательские видео должны оставаться в закрытых хранилищах провайдеров и Telegram.
