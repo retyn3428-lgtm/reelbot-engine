@@ -67,6 +67,7 @@ function fileFromMessage(message: TelegramMessage): SessionFile | null {
 function startKeyboard() { return keyboard([[{ text: "Новый монтаж", callback_data: "new_project" }], [{ text: "Моя очередь", callback_data: "queue" }, { text: "Как это работает", callback_data: "help" }]]); }
 function referenceKeyboard() { return keyboard([[{ text: "Добавить референс", callback_data: "reference" }], [{ text: "Без референса", callback_data: "skip_reference" }]]); }
 function sourceKeyboard() { return keyboard([[{ text: "Добавить ещё видео", callback_data: "more_sources" }], [{ text: "Собрать готовый ролик", callback_data: "render_preview" }], [{ text: "Отменить проект", callback_data: "cancel_project" }]]); }
+function inputChoiceKeyboard() { return keyboard([[{ text: "Сразу отправить мои видео", callback_data: "sources_first" }], [{ text: "Сначала добавить референс", callback_data: "reference" }]]); }
 function newSession(chatId: number, stage: Session["stage"]): Session { const session: Session = { stage, sources: [], createdAt: Date.now() }; sessions.set(chatId, session); return session; }
 
 function run(command: string, args: string[], cwd?: string) {
@@ -213,10 +214,11 @@ async function enqueuePreview(chatId: number) {
 async function handleCallback(query: TelegramCallbackQuery) {
   await answerCallback(query.id); const chatId = query.message?.chat.id; if (!chatId) return;
   switch (query.data) {
-    case "new_project": newSession(chatId, "awaiting_reference"); await sendTelegramMessage(chatId, "Начинаем. Пришли видео-референс стиля или выбери «Без референса».", referenceKeyboard()); return;
+    case "new_project": newSession(chatId, "awaiting_sources"); await sendTelegramMessage(chatId, "Начинаем. По умолчанию первое видео — твоё исходное. Просто отправь его, а потом нажми «Собрать готовый ролик». Если хочешь сначала показать пример стиля, выбери кнопку ниже.", inputChoiceKeyboard()); return;
+    case "sources_first": getSession(chatId).stage = "awaiting_sources"; await sendTelegramMessage(chatId, "Хорошо. Отправляй свои исходные видео — можно несколько подряд.", sourceKeyboard()); return;
     case "reference": getSession(chatId).stage = "awaiting_reference"; await sendTelegramMessage(chatId, "Пришли видео, с которого взять стиль субтитров, зум или цветокоррекцию."); return;
     case "skip_reference": newSession(chatId, "awaiting_sources"); await sendTelegramMessage(chatId, "Референс пропускаем. Теперь пришли исходные видео.", sourceKeyboard()); return;
-    case "more_sources": getSession(chatId).stage = "awaiting_sources"; await sendTelegramMessage(chatId, "Пришли следующий исходник."); return;
+    case "more_sources": getSession(chatId).stage = "awaiting_sources"; await sendTelegramMessage(chatId, "Пришли следующий исходник. Когда закончишь, нажми «Собрать готовый ролик»." ); return;
     case "render_preview": await enqueuePreview(chatId); return;
     case "cancel_project": newSession(chatId, "idle"); await sendTelegramMessage(chatId, "Проект отменён.", startKeyboard()); return;
     case "queue": await showQueue(chatId); return;
@@ -229,13 +231,15 @@ export async function handleTelegramUpdate(update: TelegramUpdate) {
   const message = update.message; if (!message) return; const chatId = message.chat.id; const text = (message.text ?? "").trim().toLowerCase();
   if (text === "/start" || text === "/help") { newSession(chatId, "idle"); await sendTelegramMessage(chatId, "Привет! Я ReelBot. Я могу принять референс и исходники, сделать настоящий вертикальный монтаж с расшифровкой и субтитрами.", startKeyboard()); return; }
   if (text === "/queue" || text.includes("очеред")) { await showQueue(chatId); return; }
-  if (text.includes("новый монтаж") || text === "/new") { newSession(chatId, "awaiting_reference"); await sendTelegramMessage(chatId, "Начинаем. Пришли референс или выбери «Без референса».", referenceKeyboard()); return; }
+  if ((text.includes("собери") || text.includes("сделай ролик") || text.includes("монтируй") || text === "готово" || text === "/render") && getSession(chatId).sources.length) { await enqueuePreview(chatId); return; }
+  if (text.includes("новый монтаж") || text === "/new") { newSession(chatId, "awaiting_sources"); await sendTelegramMessage(chatId, "Начинаем. По умолчанию первое видео — твоё исходное. Просто отправь его. Если сначала хочешь показать пример стиля, нажми «Сначала добавить референс».", inputChoiceKeyboard()); return; }
+  if (text.includes("референс") && !text.includes("без")) { getSession(chatId).stage = "awaiting_reference"; await sendTelegramMessage(chatId, "Пришли видео-референс. После него я попрошу твои исходники."); return; }
   if (text.includes("без референса") || text.includes("пропустить")) { newSession(chatId, "awaiting_sources"); await sendTelegramMessage(chatId, "Референс пропускаем. Пришли исходные видео.", sourceKeyboard()); return; }
   const file = fileFromMessage(message);
   if (file) {
     const session = getSession(chatId);
     if (session.stage === "awaiting_reference") { session.reference = file; session.stage = "awaiting_sources"; await sendTelegramMessage(chatId, `Референс принят: ${file.name}. Теперь пришли исходники.`, sourceKeyboard()); return; }
-    if (session.stage === "awaiting_sources" || session.stage === "ready") { session.sources.push(file); session.stage = "awaiting_sources"; await sendTelegramMessage(chatId, `Исходник принят: ${file.name}. Всего: ${session.sources.length}.`, sourceKeyboard()); return; }
+    if (session.stage === "awaiting_sources" || session.stage === "ready") { session.sources.push(file); session.stage = "awaiting_sources"; await sendTelegramMessage(chatId, `Исходник принят: ${file.name}. Всего: ${session.sources.length}.\n\nЕсли это все видео, нажми «Собрать готовый ролик» или напиши «собери».`, sourceKeyboard()); return; }
     await sendTelegramMessage(chatId, "Нажми «Новый монтаж», чтобы я понял, это референс или исходник.", startKeyboard()); return;
   }
   await sendTelegramMessage(chatId, "Выбери действие кнопками ниже.", startKeyboard());
