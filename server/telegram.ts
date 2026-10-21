@@ -111,15 +111,9 @@ async function downloadTelegramFile(fileId: string, dir: string, name: string) {
 async function transcribe(videoPath: string): Promise<SpeechSegment[]> {
   const audioPath = `${videoPath}.m4a`;
   await run("ffmpeg", ["-y", "-i", videoPath, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "64k", audioPath]);
-  const audio = await readFile(audioPath);
-  const form = new FormData();
-  form.append("model", "whisper-1");
-  form.append("response_format", "verbose_json");
-  form.append("prompt", "Расшифруй русскую речь из видео для динамичных субтитров Reels. Сохрани смысловую пунктуацию.");
-  form.append("file", new Blob([new Uint8Array(audio)], { type: "audio/mp4" }), "audio.m4a");
-  const response = await fetch(`${process.env.MANUS_API_URL}/v1/audio/transcriptions`, { method: "POST", headers: { Authorization: `Bearer ${process.env.MANUS_API_KEY ?? ""}` }, body: form });
-  const payload = (await response.json()) as { text?: string; segments?: SpeechSegment[]; error?: unknown };
-  if (!response.ok || payload.error) throw new Error("Не удалось расшифровать голос. Проверь, что в ролике есть слышимая речь.");
+  const script = "import json, os, sys, whisper\nmodel = whisper.load_model(os.environ.get('WHISPER_MODEL', 'tiny'))\nresult = model.transcribe(sys.argv[1], language='ru', task='transcribe', fp16=False)\nprint(json.dumps({'segments': result.get('segments', []), 'text': result.get('text', '')}, ensure_ascii=False))";
+  const result = await run("python3", ["-c", script, audioPath]);
+  const payload = JSON.parse(result.stdout) as { text?: string; segments?: SpeechSegment[] };
   if (payload.segments?.length) return payload.segments.map((item) => ({ start: item.start, end: item.end, text: item.text }));
   return [{ start: 0, end: 9999, text: payload.text ?? "" }];
 }
