@@ -19,7 +19,7 @@ const sessions = new Map<number, Session>();
 const queue: QueueJob[] = [];
 
 function getToken() { return process.env.TELEGRAM_BOT_TOKEN ?? ""; }
-function getAllowedUserId() { return Number(process.env.ALLOWED_TELEGRAM_USER_ID ?? "0"); }
+function getAllowedUserId() { return Number(process.env.ALLOWED_TELEGRAM_USER_ID ?? "[OWNER_ID_REDACTED]"); }
 function isAllowedUser(update: TelegramUpdate) {
   const userId = update.message?.from?.id ?? update.callback_query?.message?.from?.id ?? 0;
   const allowedUserId = getAllowedUserId();

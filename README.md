@@ -13,6 +13,6 @@ Start with the Webdev skill's default-template guide. Platform login, storage, p
 
 ## Closed Telegram mode
 
-The Telegram handler is fail-closed: it processes updates only when `ALLOWED_TELEGRAM_USER_ID` is set and matches the sender's numeric Telegram user ID. For this bot, the deployment must set `ALLOWED_TELEGRAM_USER_ID=[OWNER_ID_REDACTED]`. Keep `TELEGRAM_BOT_TOKEN` in the hosting provider's secret store; never commit it to this repository.
+The Telegram handler is fail-closed: it processes updates only when `ALLOWED_TELEGRAM_USER_ID` matches the sender's numeric Telegram user ID. This repository defaults that allowlist to `[OWNER_ID_REDACTED]`; deployments may override it with `ALLOWED_TELEGRAM_USER_ID`. Keep `TELEGRAM_BOT_TOKEN` in the hosting provider's secret store; never commit it to this repository.
 
 Platform configuration is readable and editable through `webdev.config`. Default settings are initial values, not enforced constraints. The agent may modify the files, commands and configuration or follow the flexible guide for another stack.
