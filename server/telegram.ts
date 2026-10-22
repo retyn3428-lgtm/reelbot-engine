@@ -3,9 +3,11 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
-type SpeechSegment = { start: number; end: number; text: string };
+type SpeechWord = { start: number; end: number; word: string };
+type SpeechSegment = { start: number; end: number; text: string; words?: SpeechWord[] };
 export type RenderSource = { fileId: string; name: string };
-export type RenderJob = { id: string; chatId: number; sources: RenderSource[] };
+export type CaptionStyle = "glass" | "pink" | "fuchsia" | "olive" | "echo";
+export type RenderJob = { id: string; chatId: number; sources: RenderSource[]; style?: CaptionStyle };
 
 type WorkerResponse = { ok?: boolean; error?: string; description?: string };
 
@@ -99,23 +101,82 @@ function assText(text: string) {
   return text.replace(/[{}\\]/g, "").replace(/\n/g, "\\N").trim();
 }
 
-function makeAss(segments: SpeechSegment[]) {
-  const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Reel,DejaVu Sans,58,&H00FFFFFF,&H00FFFFFF,&H00171717,&H7A171717,-1,0,0,0,100,100,0,0,3,18,0,2,90,90,430,1\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n`;
-  const events = segments
-    .filter((segment) => segment.text.trim())
-    .map((segment) => `Dialogue: 0,${assTime(segment.start)},${assTime(segment.end)},Reel,,0,0,0,,${assText(segment.text)}`)
-    .join("\n");
+function cleanSpeechText(text: string) {
+  return text
+    .replace(/\b(э+|э-э|эм+|м-м|мм+|бэ)\b[\s,.-]*/giu, "")
+    .replace(/(^|\s)(а|ну)(?=\s|[,!.?]|$)/giu, "$1")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.!?])/g, "$1")
+    .trim();
+}
+
+function isFillerWord(word: SpeechWord) {
+  const normalized = word.word.toLowerCase().replace(/[^а-яё-]/giu, "");
+  const duration = word.end - word.start;
+  if (duration > 0.8) return false;
+  return ["э", "ээ", "э-э", "эм", "эмм", "м", "мм", "м-м", "бэ"].includes(normalized)
+    || (["а", "ну"].includes(normalized) && duration <= 0.45);
+}
+
+function makeAss(segments: SpeechSegment[], style: CaptionStyle = "glass") {
+  const styleRows: Record<CaptionStyle, string> = {
+    glass: "DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00F2E8DD,&H9A202020,-1,0,0,0,100,100,0,0,3,10,2,2,90,90,500,1",
+    pink: "DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00F8D9E8,&HAA6E3858,-1,0,0,0,100,100,0,0,3,10,2,2,90,90,500,1",
+    fuchsia: "DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00FF4FA3,&HCC181018,-1,0,0,0,100,100,0,0,3,10,2,2,90,90,500,1",
+    olive: "DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00C6D59A,&HAA2F3924,-1,0,0,0,100,100,0,0,3,10,2,2,90,90,500,1",
+    echo: "DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00F2E8DD,&H8A202020,-1,0,0,0,100,100,0,0,3,10,2,2,90,90,500,1",
+  };
+  const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Reel,${styleRows[style]}\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n`;
+  const events = segments.flatMap((segment) => {
+    const words = (segment.words ?? []).filter((word) => !isFillerWord(word));
+    if (!words.length) {
+      const text = cleanSpeechText(segment.text);
+      return text ? [`Dialogue: 0,${assTime(segment.start)},${assTime(segment.end)},Reel,,0,0,0,,${assText(text)}`] : [];
+    }
+    const chunks: SpeechWord[][] = [];
+    for (let index = 0; index < words.length; index += 4) chunks.push(words.slice(index, index + 4));
+    return chunks.map((chunk) => {
+      const text = cleanSpeechText(chunk.map((word) => word.word).join(" "));
+      if (!text) return "";
+      return `Dialogue: 0,${assTime(chunk[0].start)},${assTime(chunk[chunk.length - 1].end)},Reel,,0,0,0,,${assText(text)}`;
+    }).filter(Boolean);
+  }).join("\n");
   return `${header}${events}\n`;
 }
 
 async function transcribe(videoPath: string): Promise<SpeechSegment[]> {
   const audioPath = `${videoPath}.m4a`;
   await run("ffmpeg", ["-y", "-i", videoPath, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "64k", audioPath]);
-  const script = "import json, os, sys, whisper\nmodel = whisper.load_model(os.environ.get('WHISPER_MODEL', 'tiny'))\nresult = model.transcribe(sys.argv[1], language='ru', task='transcribe', fp16=False)\nprint(json.dumps({'segments': result.get('segments', []), 'text': result.get('text', '')}, ensure_ascii=False))";
+  const script = "import json, os, sys, whisper\nmodel = whisper.load_model(os.environ.get('WHISPER_MODEL', 'tiny'))\nresult = model.transcribe(sys.argv[1], language='ru', task='transcribe', fp16=False, word_timestamps=True, condition_on_previous_text=False)\nprint(json.dumps({'segments': result.get('segments', []), 'text': result.get('text', '')}, ensure_ascii=False))";
   const result = await run("python3", ["-c", script, audioPath]);
   const payload = JSON.parse(result.stdout) as { text?: string; segments?: SpeechSegment[] };
-  if (payload.segments?.length) return payload.segments.map((item) => ({ start: item.start, end: item.end, text: item.text }));
+  if (payload.segments?.length) return payload.segments.map((item) => ({ start: item.start, end: item.end, text: cleanSpeechText(item.text), words: item.words }));
   return [{ start: 0, end: 9999, text: payload.text ?? "" }];
+}
+
+async function removeFillerWords(inputPath: string, segments: SpeechSegment[], dir: string) {
+  const fillers = segments.flatMap((segment) => (segment.words ?? []).filter(isFillerWord));
+  if (!fillers.length) return inputPath;
+  const durationProbe = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", inputPath]);
+  const duration = Number(durationProbe.stdout.trim());
+  if (!Number.isFinite(duration)) return inputPath;
+  const intervals: Array<[number, number]> = [];
+  let cursor = 0;
+  for (const filler of fillers.sort((a, b) => a.start - b.start)) {
+    const start = Math.max(cursor, filler.start - 0.04);
+    const end = Math.min(duration, filler.end + 0.04);
+    if (start - cursor > 0.12) intervals.push([cursor, start]);
+    cursor = Math.max(cursor, end);
+  }
+  if (duration - cursor > 0.12) intervals.push([cursor, duration]);
+  if (intervals.length < 2) return inputPath;
+  const pieces: string[] = [];
+  for (const [start, end] of intervals) {
+    const piece = join(dir, `filler-cut-${pieces.length}.mp4`);
+    await run("ffmpeg", ["-y", "-ss", String(start), "-i", inputPath, "-t", String(end - start), "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-b:a", "128k", piece]);
+    pieces.push(piece);
+  }
+  return concatSources(pieces, dir);
 }
 
 async function concatSources(paths: string[], dir: string) {
@@ -160,9 +221,9 @@ async function removeLongPauses(inputPath: string, dir: string) {
   return concatSources(pieces, dir);
 }
 
-async function renderVideo(inputPath: string, segments: SpeechSegment[], dir: string) {
+async function renderVideo(inputPath: string, segments: SpeechSegment[], dir: string, style: CaptionStyle = "glass") {
   const assPath = join(dir, "captions.ass");
-  await writeFile(assPath, makeAss(segments), "utf8");
+  await writeFile(assPath, makeAss(segments, style), "utf8");
   const output = join(dir, "reelbot-result.mp4");
   const vertical = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1166:2074,crop=1080:1920";
   await run("ffmpeg", ["-y", "-i", inputPath, "-vf", `${vertical},subtitles=${assPath}`, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output]);
@@ -182,14 +243,16 @@ export async function processRenderJob(job: RenderJob) {
   if (!job?.id || !job.chatId || !Array.isArray(job.sources) || !job.sources.length) throw new Error("В задаче нет корректного списка исходных видео.");
   const dir = await mkdtemp(join(tmpdir(), "reelbot-"));
   try {
-    await sendTelegramMessage(job.chatId, `Начинаю монтаж ${job.id}. Скачиваю ${job.sources.length} исходник(а), делаю вертикальный MP4, удаляю длинные паузы и добавляю русские субтитры.`);
+    await sendTelegramMessage(job.chatId, `Начинаю монтаж ${job.id}. Скачиваю ${job.sources.length} исходник(а), убираю паузы и слова-паразиты, затем собираю динамичные субтитры.`);
     const paths: string[] = [];
     for (const source of job.sources) paths.push(await downloadTelegramFile(source.fileId, dir, source.name));
     const joined = await concatSources(paths, dir);
-    const cleaned = await removeLongPauses(joined, dir);
-    const segments = await transcribe(cleaned);
+    const withoutPauses = await removeLongPauses(joined, dir);
+    const roughSegments = await transcribe(withoutPauses);
+    const cleaned = await removeFillerWords(withoutPauses, roughSegments, dir);
+    const segments = cleaned === withoutPauses ? roughSegments : await transcribe(cleaned);
     await sendTelegramMessage(job.chatId, `Речь расшифрована. Готовлю субтитры и финальный файл (${segments.filter((item) => item.text.trim()).length} фрагментов).`);
-    const rendered = await renderVideo(cleaned, segments, dir);
+    const rendered = await renderVideo(cleaned, segments, dir, job.style ?? "glass");
     const output = await compressForTelegram(rendered);
     await sendTelegramVideo(job.chatId, output, `${job.id} готов. Вертикальный формат, субтитры и нормализация звука.`);
   } finally {

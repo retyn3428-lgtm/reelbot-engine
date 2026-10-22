@@ -26,6 +26,18 @@ async function sendMessage(env, chatId, text) {
   return telegram(env, "sendMessage", { chat_id: chatId, text, disable_web_page_preview: true });
 }
 
+const CAPTION_STYLES = {
+  "1": { id: "glass", label: "Стекло — белый текст на полупрозрачной тёмной плашке" },
+  "2": { id: "pink", label: "Пудровый — белый текст на мягкой розовой плашке" },
+  "3": { id: "fuchsia", label: "Фуксия — контрастный яркий акцент" },
+  "4": { id: "olive", label: "Оливковый — тёплый editorial-стиль" },
+  "5": { id: "echo", label: "Эхо — плотная плашка с ощущением повторного следа" },
+};
+
+function captionStyleHelp() {
+  return `Выбери стиль субтитров командой /style номер:\n\n${Object.entries(CAPTION_STYLES).map(([number, item]) => `${number}. ${item.label}`).join("\n")}\n\nНапример: /style 2`;
+}
+
 function authorizedRunner(request, env) {
   const token = env.TELEGRAM_BOT_TOKEN;
   const header = request.headers.get("authorization") || "";
@@ -75,14 +87,29 @@ async function handleTelegram(request, env) {
   const sessionKey = `session:${chatId}`;
   let session = await env.STATE.get(sessionKey, "json");
 
+  if (normalized === "/styles" || normalized === "стили") {
+    await sendMessage(env, chatId, captionStyleHelp());
+    return new Response("ok");
+  }
+
+  const styleMatch = normalized.match(/^(?:\/style|стиль)\s*([1-5])$/);
+  if (styleMatch) {
+    const choice = CAPTION_STYLES[styleMatch[1]];
+    session ||= { sources: [], createdAt: Date.now() };
+    session.style = choice.id;
+    await env.STATE.put(sessionKey, JSON.stringify(session), { expirationTtl: SESSION_TTL });
+    await sendMessage(env, chatId, `Стиль выбран: ${choice.label}. Теперь отправь видео или напиши /new для нового проекта.`);
+    return new Response("ok");
+  }
+
   if (normalized === "/start" || normalized === "/help") {
-    await sendMessage(env, chatId, "Привет! Я закрытый ReelBot. Отправь /new, затем одно или несколько видео (до 20 МБ каждое), потом напиши «собери». Я сделаю вертикальный ролик с русскими субтитрами, удалением длинных пауз и нормализацией звука.");
+    await sendMessage(env, chatId, "Привет! Я закрытый ReelBot. Отправь /new, выбери стиль через /styles, затем одно или несколько видео (до 20 МБ каждое), потом напиши «собери». Я сделаю вертикальный ролик с русскими субтитрами, удалением длинных пауз и нормализацией звука.");
     return new Response("ok");
   }
 
   if (normalized === "/new" || normalized === "новый монтаж") {
-    await env.STATE.put(sessionKey, JSON.stringify({ sources: [], createdAt: Date.now() }), { expirationTtl: SESSION_TTL });
-    await sendMessage(env, chatId, "Новый проект готов. Отправь исходное видео (до 20 МБ). Можно прислать несколько, затем напиши «собери».");
+    await env.STATE.put(sessionKey, JSON.stringify({ sources: [], style: "glass", createdAt: Date.now() }), { expirationTtl: SESSION_TTL });
+    await sendMessage(env, chatId, "Новый проект готов. Сначала выбери стиль через /styles, затем отправь исходное видео (до 20 МБ). Можно прислать несколько, потом напиши «собери».");
     return new Response("ok");
   }
 
@@ -117,7 +144,7 @@ async function handleTelegram(request, env) {
       return new Response("ok");
     }
     const id = `RB-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
-    const job = { id, chatId, sources: session.sources, status: "queued", createdAt: Date.now(), attempts: 0 };
+    const job = { id, chatId, sources: session.sources, style: session.style || "glass", status: "queued", createdAt: Date.now(), attempts: 0 };
     await env.STATE.put(`job:${id}`, JSON.stringify(job), { expirationTtl: JOB_TTL });
     await env.STATE.delete(sessionKey);
     await sendMessage(env, chatId, `Задача ${id} сохранена в очереди до 7 дней. Облачный runner заберёт её при ближайшем запуске; задержка зависит от GitHub. Статус можно проверить командой /queue.`);
