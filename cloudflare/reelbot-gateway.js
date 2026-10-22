@@ -120,7 +120,7 @@ async function handleTelegram(request, env) {
     const job = { id, chatId, sources: session.sources, status: "queued", createdAt: Date.now(), attempts: 0 };
     await env.STATE.put(`job:${id}`, JSON.stringify(job), { expirationTtl: JOB_TTL });
     await env.STATE.delete(sessionKey);
-    await sendMessage(env, chatId, `Задача ${id} поставлена в очередь. Бесплатный монтажный runner заберёт её при ближайшем запуске; обычно это занимает несколько минут.`);
+    await sendMessage(env, chatId, `Задача ${id} сохранена в очереди до 7 дней. Облачный runner заберёт её при ближайшем запуске; задержка зависит от GitHub. Статус можно проверить командой /queue.`);
     return new Response("ok");
   }
 
