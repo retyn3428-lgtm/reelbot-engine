@@ -24,11 +24,16 @@ async function post<T>(path: string, body: unknown = {}): Promise<T> {
 
 // Ensure the Telegram webhook is configured through Cloudflare. The token never appears in logs.
 await post("/runner/activate");
-const result = await post<{ job: RenderJob | null }>("/runner/next");
-const job = result.job;
-if (!job) {
-  console.log("[runner] Idle: no render jobs are queued.");
-} else {
+let processed = 0;
+const maxJobsPerRun = 10;
+while (processed < maxJobsPerRun) {
+  const result = await post<{ job: RenderJob | null }>("/runner/next");
+  const job = result.job;
+  if (!job) {
+    if (processed === 0) console.log("[runner] Idle: no render jobs are queued.");
+    break;
+  }
+  processed += 1;
   console.log("[runner] A render job was claimed.");
   try {
     await processRenderJob(job);
@@ -49,3 +54,4 @@ if (!job) {
     console.error("[runner] Render job failed; details were not written to public logs.");
   }
 }
+console.log(`[runner] Finished batch: ${processed} job(s).`);
