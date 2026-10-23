@@ -35,12 +35,32 @@ const CAPTION_STYLES = {
   "6": { id: "mixed", label: "Микс — белый текст + цветное ключевое слово" },
 };
 
+const MONTAGE_PRESETS = {
+  clean: "Чистый — паузы и слова-паразиты, jump cut, без мемов",
+  dynamic: "Динамичный — короткие фразы, мягкий punch-in и акцент на хуке",
+  circle: "Круглая карточка — спикер в круге, заголовок сверху, подписи ниже",
+  split: "Split-screen — спикер плюс место под экран или B-roll",
+  meme: "С мемами — сначала предложить GIF/B-roll, вставлять только после подтверждения",
+};
+
 function captionStyleHelp() {
   return `Выбери стиль субтитров. Под каждым вариантом указаны цвета:\n\n${Object.entries(CAPTION_STYLES).map(([number, item]) => `${number}. ${item.label}`).join("\n")}\n\nПосле выбора можно собрать ролик командой «собери».`;
 }
 
 function captionStyleKeyboard() {
   return { inline_keyboard: Object.entries(CAPTION_STYLES).map(([number, item]) => ([{ text: `${number}. ${item.id}`, callback_data: `style:${item.id}` }])) };
+}
+
+function montageHelp() {
+  return `Выбери, что именно собирать:\n\n${Object.entries(MONTAGE_PRESETS).map(([id, label]) => `${id} — ${label}`).join("\n\n")}`;
+}
+
+function montageKeyboard() {
+  return { inline_keyboard: Object.keys(MONTAGE_PRESETS).map((id) => ([{ text: id, callback_data: `montage:${id}` }])) };
+}
+
+function actionKeyboard() {
+  return { inline_keyboard: [[{ text: "Собрать сейчас", callback_data: "render:now" }], [{ text: "Добавить ещё видео", callback_data: "render:add" }]] };
 }
 
 function authorizedRunner(request, env) {
@@ -107,6 +127,42 @@ async function handleTelegram(request, env) {
     return new Response("ok");
   }
 
+  if (update.callback_query?.data?.startsWith("montage:")) {
+    const selected = update.callback_query.data.slice(8);
+    if (MONTAGE_PRESETS[selected]) {
+      const callbackSessionKey = `session:${chatId}`;
+      const callbackSession = (await env.STATE.get(callbackSessionKey, "json")) || { sources: [], createdAt: Date.now() };
+      callbackSession.montage = selected;
+      await env.STATE.put(callbackSessionKey, JSON.stringify(callbackSession), { expirationTtl: SESSION_TTL });
+      await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: `Монтаж: ${selected}` });
+      await sendMessage(env, chatId, `Выбрано: ${MONTAGE_PRESETS[selected]}. Теперь можно собрать сразу или добавить ещё исходники.`, actionKeyboard());
+    }
+    return new Response("ok");
+  }
+
+  if (update.callback_query?.data === "render:add") {
+    await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: "Можно добавить ещё видео" });
+    await sendMessage(env, chatId, "Хорошо. Пришли ещё видео или ссылку Dropbox/OneDrive.");
+    return new Response("ok");
+  }
+
+  if (update.callback_query?.data === "render:now") {
+    const callbackSessionKey = `session:${chatId}`;
+    const callbackSession = await env.STATE.get(callbackSessionKey, "json");
+    if (!callbackSession?.sources?.length) {
+      await sendMessage(env, chatId, "Сначала пришли хотя бы одно видео.");
+      return new Response("ok");
+    }
+    const id = `RB-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+    const montage = callbackSession.montage || "clean";
+    const job = { id, chatId, sources: callbackSession.sources, style: callbackSession.style || "glass", montage, status: "queued", createdAt: Date.now(), attempts: 0 };
+    await env.STATE.put(`job:${id}`, JSON.stringify(job), { expirationTtl: JOB_TTL });
+    await env.STATE.delete(callbackSessionKey);
+    await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: "Задача отправлена в монтаж" });
+    await sendMessage(env, chatId, `Собираю сейчас. Режим: ${MONTAGE_PRESETS[montage]}. Субтитры и очистка речи будут применены.`);
+    return new Response("ok");
+  }
+
   const text = String(update.message?.text || "").trim();
   const normalized = text.toLowerCase();
   const sessionKey = `session:${chatId}`;
@@ -155,7 +211,8 @@ async function handleTelegram(request, env) {
     }
     session.sources.push({ url: externalUrl, name: "cloud-video.mp4" });
     await env.STATE.put(sessionKey, JSON.stringify(session), { expirationTtl: SESSION_TTL });
-    await sendMessage(env, chatId, `Ссылка принята (${session.sources.length}/20). Пришли ещё ссылку или напиши «собери».`);
+    await sendMessage(env, chatId, `Ссылка принята (${session.sources.length}/20).`, actionKeyboard());
+    await sendMessage(env, chatId, montageHelp(), montageKeyboard());
     return new Response("ok");
   }
 
@@ -167,13 +224,15 @@ async function handleTelegram(request, env) {
     }
     session ||= { sources: [], createdAt: Date.now() };
     session.sources ||= [];
-    if (session.sources.length >= 5) {
-      await sendMessage(env, chatId, "В одном проекте можно обработать не больше 5 исходных видео. Напиши «собери» или начни новый через /new.");
+    if (session.sources.length >= 20) {
+      await sendMessage(env, chatId, "В одном проекте можно обработать не больше 20 исходников. Выбери режим и нажми «Собрать сейчас».");
       return new Response("ok");
     }
     session.sources.push({ fileId: source.fileId, name: source.name });
     await env.STATE.put(sessionKey, JSON.stringify(session), { expirationTtl: SESSION_TTL });
-    await sendMessage(env, chatId, `Видео принято (${session.sources.length}/5). Пришли ещё одно или напиши «собери».`);
+    await sendMessage(env, chatId, `Видео принято (${session.sources.length}/20).`, actionKeyboard());
+    await sendMessage(env, chatId, captionStyleHelp(), captionStyleKeyboard());
+    await sendMessage(env, chatId, montageHelp(), montageKeyboard());
     return new Response("ok");
   }
 
@@ -183,7 +242,7 @@ async function handleTelegram(request, env) {
       return new Response("ok");
     }
     const id = `RB-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
-    const job = { id, chatId, sources: session.sources, style: session.style || "glass", status: "queued", createdAt: Date.now(), attempts: 0 };
+    const job = { id, chatId, sources: session.sources, style: session.style || "glass", montage: session.montage || "clean", status: "queued", createdAt: Date.now(), attempts: 0 };
     await env.STATE.put(`job:${id}`, JSON.stringify(job), { expirationTtl: JOB_TTL });
     await env.STATE.delete(sessionKey);
     await sendMessage(env, chatId, `Задача ${id} сохранена. Облачный runner заберёт её при ближайшем запуске; статус можно проверить командой /queue.`);

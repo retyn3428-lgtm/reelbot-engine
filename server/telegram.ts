@@ -7,7 +7,8 @@ type SpeechWord = { start: number; end: number; word: string };
 type SpeechSegment = { start: number; end: number; text: string; words?: SpeechWord[] };
 export type RenderSource = { fileId?: string; url?: string; name: string };
 export type CaptionStyle = "glass" | "pink" | "fuchsia" | "olive" | "echo" | "mixed";
-export type RenderJob = { id: string; chatId: number; sources: RenderSource[]; style?: CaptionStyle };
+export type MontagePreset = "clean" | "dynamic" | "circle" | "split" | "meme";
+export type RenderJob = { id: string; chatId: number; sources: RenderSource[]; style?: CaptionStyle; montage?: MontagePreset };
 
 type WorkerResponse = { ok?: boolean; error?: string; description?: string };
 
@@ -126,7 +127,7 @@ function captionText(text: string, style: CaptionStyle) {
 
 function cleanSpeechText(text: string) {
   return text
-    .replace(/\b(э+|э-э|эм+|м-м|мм+|бэ)\b[\s,.-]*/giu, "")
+    .replace(/(^|\s)(э{1,3}|э-э|эм{1,3}|м-м|м{2,3}|бэ)(?=$|[\s,.;!?])/giu, "$1")
     .replace(/(^|\s)(а|ну)(?=\s|[,!.?]|$)/giu, "$1")
     .replace(/\s{2,}/g, " ")
     .replace(/\s+([,.!?])/g, "$1")
@@ -187,8 +188,8 @@ async function removeFillerWords(inputPath: string, segments: SpeechSegment[], d
   const intervals: Array<[number, number]> = [];
   let cursor = 0;
   for (const filler of fillers.sort((a, b) => a.start - b.start)) {
-    const start = Math.max(cursor, filler.start - 0.04);
-    const end = Math.min(duration, filler.end + 0.04);
+    const start = Math.max(cursor, filler.start - 0.015);
+    const end = Math.min(duration, filler.end + 0.015);
     if (start - cursor > 0.12) intervals.push([cursor, start]);
     cursor = Math.max(cursor, end);
   }
@@ -245,12 +246,13 @@ async function removeLongPauses(inputPath: string, dir: string) {
   return concatSources(pieces, dir);
 }
 
-async function renderVideo(inputPath: string, segments: SpeechSegment[], dir: string, style: CaptionStyle = "glass") {
+async function renderVideo(inputPath: string, segments: SpeechSegment[], dir: string, style: CaptionStyle = "glass", montage: MontagePreset = "clean") {
   const assPath = join(dir, "captions.ass");
   await writeFile(assPath, makeAss(segments, style), "utf8");
   const output = join(dir, "reelbot-result.mp4");
   const vertical = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1166:2074,crop=1080:1920";
-  await run("ffmpeg", ["-y", "-i", inputPath, "-vf", `${vertical},subtitles=${assPath}`, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output]);
+  const composition = montage === "dynamic" ? `${vertical},unsharp=5:5:0.35` : vertical;
+  await run("ffmpeg", ["-y", "-i", inputPath, "-vf", `${composition},subtitles=${assPath}`, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output]);
   return output;
 }
 
@@ -267,7 +269,7 @@ export async function processRenderJob(job: RenderJob) {
   if (!job?.id || !job.chatId || !Array.isArray(job.sources) || !job.sources.length) throw new Error("В задаче нет корректного списка исходных видео.");
   const dir = await mkdtemp(join(tmpdir(), "reelbot-"));
   try {
-    await sendTelegramMessage(job.chatId, `Начинаю монтаж ${job.id}. Скачиваю ${job.sources.length} исходник(а), убираю паузы и слова-паразиты, затем собираю динамичные субтитры.`);
+    await sendTelegramMessage(job.chatId, `Начинаю монтаж ${job.id}. Режим: ${job.montage ?? "clean"}. Скачиваю ${job.sources.length} исходник(а), убираю только длинные паузы и отдельные слова-паразиты, затем собираю субтитры.`);
     const paths: string[] = [];
     for (const source of job.sources) {
       if (source.url) paths.push(await downloadExternalFile(source.url, dir, source.name));
@@ -280,7 +282,7 @@ export async function processRenderJob(job: RenderJob) {
     const cleaned = await removeFillerWords(withoutPauses, roughSegments, dir);
     const segments = cleaned === withoutPauses ? roughSegments : await transcribe(cleaned);
     await sendTelegramMessage(job.chatId, `Речь расшифрована. Готовлю субтитры и финальный файл (${segments.filter((item) => item.text.trim()).length} фрагментов).`);
-    const rendered = await renderVideo(cleaned, segments, dir, job.style ?? "glass");
+    const rendered = await renderVideo(cleaned, segments, dir, job.style ?? "glass", job.montage ?? "clean");
     const output = await compressForTelegram(rendered);
     await sendTelegramVideo(job.chatId, output, `${job.id} готов. Вертикальный формат, субтитры и нормализация звука.`);
   } finally {
