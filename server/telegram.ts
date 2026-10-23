@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 
 type SpeechWord = { start: number; end: number; word: string };
 type SpeechSegment = { start: number; end: number; text: string; words?: SpeechWord[] };
-export type RenderSource = { fileId: string; name: string };
+export type RenderSource = { fileId?: string; url?: string; name: string };
 export type CaptionStyle = "glass" | "pink" | "fuchsia" | "olive" | "echo";
 export type RenderJob = { id: string; chatId: number; sources: RenderSource[]; style?: CaptionStyle };
 
@@ -55,6 +55,22 @@ async function downloadTelegramFile(fileId: string, dir: string, name: string) {
   const safeName = basename(name || "video.mp4").replace(/[^a-zA-Z0-9._-]/g, "_");
   const output = join(dir, `${Date.now()}-${safeName}`);
   await writeFile(output, new Uint8Array(await response.arrayBuffer()));
+  return output;
+}
+
+async function downloadExternalFile(url: string, dir: string, name: string) {
+  const normalized = url.includes("dropbox.com")
+    ? url.replace(/[?&]dl=0\b/, "dl=1")
+    : url.includes("1drv.ms") || url.includes("onedrive.live.com")
+      ? `${url}${url.includes("?") ? "&" : "?"}download=1`
+      : url;
+  const response = await fetch(normalized, { redirect: "follow" });
+  if (!response.ok || !response.body) throw new Error("Не удалось скачать исходник по ссылке Dropbox/OneDrive.");
+  const safeName = basename(name || "video.mp4").replace(/[^a-zA-Z0-9._-]/g, "_");
+  const output = join(dir, `${Date.now()}-${safeName}`);
+  const file = new Uint8Array(await response.arrayBuffer());
+  if (file.byteLength > 2 * 1024 * 1024 * 1024) throw new Error("Файл больше 2 ГБ — для одного задания это слишком большой исходник.");
+  await writeFile(output, file);
   return output;
 }
 
@@ -245,7 +261,11 @@ export async function processRenderJob(job: RenderJob) {
   try {
     await sendTelegramMessage(job.chatId, `Начинаю монтаж ${job.id}. Скачиваю ${job.sources.length} исходник(а), убираю паузы и слова-паразиты, затем собираю динамичные субтитры.`);
     const paths: string[] = [];
-    for (const source of job.sources) paths.push(await downloadTelegramFile(source.fileId, dir, source.name));
+    for (const source of job.sources) {
+      if (source.url) paths.push(await downloadExternalFile(source.url, dir, source.name));
+      else if (source.fileId) paths.push(await downloadTelegramFile(source.fileId, dir, source.name));
+      else throw new Error("У исходника нет Telegram file_id или внешней ссылки.");
+    }
     const joined = await concatSources(paths, dir);
     const withoutPauses = await removeLongPauses(joined, dir);
     const roughSegments = await transcribe(withoutPauses);

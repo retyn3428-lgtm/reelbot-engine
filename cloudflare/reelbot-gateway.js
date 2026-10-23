@@ -1,7 +1,7 @@
 const MAX_INPUT_BYTES = 20 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 49 * 1024 * 1024;
 const SESSION_TTL = 24 * 60 * 60;
-const JOB_TTL = 7 * 24 * 60 * 60;
+const JOB_TTL = 30 * 24 * 60 * 60;
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -51,6 +51,13 @@ function isVideo(message) {
     return { fileId: document.file_id, name: document.file_name || "video.mp4", size: document.file_size };
   }
   return null;
+}
+
+function isExternalVideoUrl(text) {
+  const value = text.trim().replace(/[)>.,]+$/, "");
+  if (!/^https?:\/\//i.test(value)) return null;
+  if (!/dropbox\.com|1drv\.ms|onedrive\.live\.com/i.test(value)) return null;
+  return value;
 }
 
 async function getJobs(env, chatId) {
@@ -120,6 +127,20 @@ async function handleTelegram(request, env) {
     return new Response("ok");
   }
 
+  const externalUrl = isExternalVideoUrl(text);
+  if (externalUrl) {
+    session ||= { sources: [], createdAt: Date.now() };
+    session.sources ||= [];
+    if (session.sources.length >= 20) {
+      await sendMessage(env, chatId, "В одном проекте можно обработать до 20 ссылок. Напиши «собери» или начни новый через /new.");
+      return new Response("ok");
+    }
+    session.sources.push({ url: externalUrl, name: "cloud-video.mp4" });
+    await env.STATE.put(sessionKey, JSON.stringify(session), { expirationTtl: SESSION_TTL });
+    await sendMessage(env, chatId, `Ссылка принята (${session.sources.length}/20). Пришли ещё ссылку или напиши «собери».`);
+    return new Response("ok");
+  }
+
   const source = isVideo(message);
   if (source) {
     if (Number(source.size || 0) > MAX_INPUT_BYTES) {
@@ -147,7 +168,7 @@ async function handleTelegram(request, env) {
     const job = { id, chatId, sources: session.sources, style: session.style || "glass", status: "queued", createdAt: Date.now(), attempts: 0 };
     await env.STATE.put(`job:${id}`, JSON.stringify(job), { expirationTtl: JOB_TTL });
     await env.STATE.delete(sessionKey);
-    await sendMessage(env, chatId, `Задача ${id} сохранена в очереди до 7 дней. Облачный runner заберёт её при ближайшем запуске; задержка зависит от GitHub. Статус можно проверить командой /queue.`);
+    await sendMessage(env, chatId, `Задача ${id} сохранена. Облачный runner заберёт её при ближайшем запуске; статус можно проверить командой /queue.`);
     return new Response("ok");
   }
 
