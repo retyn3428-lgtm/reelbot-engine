@@ -6,7 +6,7 @@ import { basename, join } from "node:path";
 type SpeechWord = { start: number; end: number; word: string };
 type SpeechSegment = { start: number; end: number; text: string; words?: SpeechWord[] };
 export type RenderSource = { fileId?: string; url?: string; name: string };
-export type CaptionStyle = "glass" | "pink" | "fuchsia" | "olive" | "echo";
+export type CaptionStyle = "glass" | "pink" | "fuchsia" | "olive" | "echo" | "mixed";
 export type RenderJob = { id: string; chatId: number; sources: RenderSource[]; style?: CaptionStyle };
 
 type WorkerResponse = { ok?: boolean; error?: string; description?: string };
@@ -117,6 +117,13 @@ function assText(text: string) {
   return text.replace(/[{}\\]/g, "").replace(/\n/g, "\\N").trim();
 }
 
+function captionText(text: string, style: CaptionStyle) {
+  const safe = assText(text);
+  if (style !== "mixed") return safe;
+  const [first, ...rest] = safe.split(" ");
+  return `{\\c&H00A3FF&}${first}{\\c&H00FFFFFF&}${rest.length ? ` ${rest.join(" ")}` : ""}`;
+}
+
 function cleanSpeechText(text: string) {
   return text
     .replace(/\b(э+|э-э|эм+|м-м|мм+|бэ)\b[\s,.-]*/giu, "")
@@ -141,6 +148,7 @@ function makeAss(segments: SpeechSegment[], style: CaptionStyle = "glass") {
     fuchsia: "DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00FF4FA3,&HCC181018,-1,0,0,0,100,100,0,0,3,10,2,2,90,90,500,1",
     olive: "DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00C6D59A,&HAA2F3924,-1,0,0,0,100,100,0,0,3,10,2,2,90,90,500,1",
     echo: "DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00F2E8DD,&H8A202020,-1,0,0,0,100,100,0,0,3,10,2,2,90,90,500,1",
+    mixed: "DejaVu Sans,62,&H00FFFFFF,&H00FFFFFF,&H00FF4FA3,&H9A202020,-1,0,0,0,100,100,0,0,3,10,2,2,90,90,500,1",
   };
   const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Reel,${styleRows[style].replace(",62,", ",54,").replace(",90,90,500,", ",150,150,500,")}\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n`;
   const events = segments.flatMap((segment) => {
@@ -154,7 +162,7 @@ function makeAss(segments: SpeechSegment[], style: CaptionStyle = "glass") {
     return chunks.map((chunk) => {
       const text = cleanSpeechText(chunk.map((word) => word.word).join(" "));
       if (!text) return "";
-      return `Dialogue: 0,${assTime(chunk[0].start)},${assTime(chunk[chunk.length - 1].end)},Reel,,0,0,0,,${assText(text)}`;
+      return `Dialogue: 0,${assTime(chunk[0].start)},${assTime(chunk[chunk.length - 1].end)},Reel,,0,0,0,,${captionText(text, style)}`;
     }).filter(Boolean);
   }).join("\n");
   return `${header}${events}\n`;

@@ -22,20 +22,25 @@ async function telegram(env, method, body) {
   return payload.result;
 }
 
-async function sendMessage(env, chatId, text) {
-  return telegram(env, "sendMessage", { chat_id: chatId, text, disable_web_page_preview: true });
+async function sendMessage(env, chatId, text, replyMarkup) {
+  return telegram(env, "sendMessage", { chat_id: chatId, text, disable_web_page_preview: true, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
 }
 
 const CAPTION_STYLES = {
-  "1": { id: "glass", label: "Стекло — белый текст на полупрозрачной тёмной плашке" },
-  "2": { id: "pink", label: "Пудровый — белый текст на мягкой розовой плашке" },
-  "3": { id: "fuchsia", label: "Фуксия — контрастный яркий акцент" },
-  "4": { id: "olive", label: "Оливковый — тёплый editorial-стиль" },
-  "5": { id: "echo", label: "Эхо — плотная плашка с ощущением повторного следа" },
+  "1": { id: "glass", label: "Стекло — #FFFFFF + #20202099, тонкая тень" },
+  "2": { id: "pink", label: "Пудровый — #FFFFFF + #E8B8C8, мягкая плашка" },
+  "3": { id: "fuchsia", label: "Фуксия — #FFFFFF + #FF4FA3 + #181018" },
+  "4": { id: "olive", label: "Оливковый — #FFFFFF + #C6D59A, editorial" },
+  "5": { id: "echo", label: "Эхо — #FFFFFF + #2020208A, повторный след" },
+  "6": { id: "mixed", label: "Микс — белый текст + цветное ключевое слово" },
 };
 
 function captionStyleHelp() {
-  return `Выбери стиль субтитров командой /style номер:\n\n${Object.entries(CAPTION_STYLES).map(([number, item]) => `${number}. ${item.label}`).join("\n")}\n\nНапример: /style 2`;
+  return `Выбери стиль субтитров. Под каждым вариантом указаны цвета:\n\n${Object.entries(CAPTION_STYLES).map(([number, item]) => `${number}. ${item.label}`).join("\n")}\n\nПосле выбора можно собрать ролик командой «собери».`;
+}
+
+function captionStyleKeyboard() {
+  return { inline_keyboard: Object.entries(CAPTION_STYLES).map(([number, item]) => ([{ text: `${number}. ${item.id}`, callback_data: `style:${item.id}` }])) };
 }
 
 function authorizedRunner(request, env) {
@@ -89,17 +94,30 @@ async function handleTelegram(request, env) {
     return new Response("ok");
   }
 
+  if (update.callback_query?.data?.startsWith("style:")) {
+    const selected = Object.values(CAPTION_STYLES).find((item) => item.id === update.callback_query.data.slice(6));
+    if (selected) {
+      const callbackSessionKey = `session:${chatId}`;
+      const callbackSession = (await env.STATE.get(callbackSessionKey, "json")) || { sources: [], createdAt: Date.now() };
+      callbackSession.style = selected.id;
+      await env.STATE.put(callbackSessionKey, JSON.stringify(callbackSession), { expirationTtl: SESSION_TTL });
+      await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: `Выбрано: ${selected.id}` });
+      await sendMessage(env, chatId, `Стиль выбран: ${selected.label}. Теперь отправь видео/ссылку или напиши «собери».`);
+    }
+    return new Response("ok");
+  }
+
   const text = String(update.message?.text || "").trim();
   const normalized = text.toLowerCase();
   const sessionKey = `session:${chatId}`;
   let session = await env.STATE.get(sessionKey, "json");
 
   if (normalized === "/styles" || normalized === "стили") {
-    await sendMessage(env, chatId, captionStyleHelp());
+    await sendMessage(env, chatId, captionStyleHelp(), captionStyleKeyboard());
     return new Response("ok");
   }
 
-  const styleMatch = normalized.match(/^(?:\/style|стиль)\s*([1-5])$/);
+  const styleMatch = normalized.match(/^(?:\/style|стиль)\s*([1-6])$/);
   if (styleMatch) {
     const choice = CAPTION_STYLES[styleMatch[1]];
     session ||= { sources: [], createdAt: Date.now() };
