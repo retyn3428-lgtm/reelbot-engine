@@ -1,7 +1,23 @@
 const MAX_INPUT_BYTES = 20 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 49 * 1024 * 1024;
 const SESSION_TTL = 24 * 60 * 60;
-const JOB_TTL = 30 * 24 * 60 * 60;
+const JOB_TTL = 7 * 24 * 60 * 60;
+const MAX_SOURCES = 20;
+const MAX_INSERTS = 10;
+const MAX_PLATES = 10;
+// Новое имя маркера: после выкладки вебхук переустановится сам при ближайшем запуске раннера.
+const WEBHOOK_MARKER = "config:webhook-active-v3";
+
+const CAPTION_STYLES = {
+  1: { id: "glass", label: "Glass" },
+  2: { id: "powder", label: "Powder" },
+  3: { id: "fuchsia", label: "Fuchsia" },
+  4: { id: "olive", label: "Olive" },
+  5: { id: "echo", label: "Echo" },
+  6: { id: "mixed", label: "Mixed Key Words" },
+};
+const DEFAULT_STYLE = "glass";
+const styleById = (id) => Object.values(CAPTION_STYLES).find((item) => item.id === id);
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -26,41 +42,11 @@ async function sendMessage(env, chatId, text, replyMarkup) {
   return telegram(env, "sendMessage", { chat_id: chatId, text, disable_web_page_preview: true, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
 }
 
-const CAPTION_STYLES = {
-  "1": { id: "glass", label: "Стекло — #FFFFFF + #20202099, тонкая тень" },
-  "2": { id: "pink", label: "Пудровый — #FFFFFF + #E8B8C8, мягкая плашка" },
-  "3": { id: "fuchsia", label: "Фуксия — #FFFFFF + #FF4FA3 + #181018" },
-  "4": { id: "olive", label: "Оливковый — #FFFFFF + #C6D59A, editorial" },
-  "5": { id: "echo", label: "Эхо — #FFFFFF + #2020208A, повторный след" },
-  "6": { id: "mixed", label: "Микс — белый текст + цветное ключевое слово" },
-};
-
-const MONTAGE_PRESETS = {
-  clean: "Чистый — паузы и слова-паразиты, jump cut, без мемов",
-  dynamic: "Динамичный — короткие фразы, мягкий punch-in и акцент на хуке",
-  circle: "Круглая карточка — спикер в круге, заголовок сверху, подписи ниже",
-  split: "Split-screen — спикер плюс место под экран или B-roll",
-  meme: "С мемами — сначала предложить GIF/B-roll, вставлять только после подтверждения",
-};
-
-function captionStyleHelp() {
-  return `Выбери стиль субтитров. Под каждым вариантом указаны цвета:\n\n${Object.entries(CAPTION_STYLES).map(([number, item]) => `${number}. ${item.label}`).join("\n")}\n\nПосле выбора можно собрать ролик командой «собери».`;
-}
-
-function captionStyleKeyboard() {
-  return { inline_keyboard: Object.entries(CAPTION_STYLES).map(([number, item]) => ([{ text: `${number}. ${item.id}`, callback_data: `style:${item.id}` }])) };
-}
-
-function montageHelp() {
-  return `Выбери, что именно собирать:\n\n${Object.entries(MONTAGE_PRESETS).map(([id, label]) => `${id} — ${label}`).join("\n\n")}`;
-}
-
-function montageKeyboard() {
-  return { inline_keyboard: Object.keys(MONTAGE_PRESETS).map((id) => ([{ text: id, callback_data: `montage:${id}` }])) };
-}
-
-function actionKeyboard() {
-  return { inline_keyboard: [[{ text: "Собрать сейчас", callback_data: "render:now" }], [{ text: "Добавить ещё видео", callback_data: "render:add" }]] };
+function captionStyleKeyboard(active) {
+  const buttons = Object.values(CAPTION_STYLES).map((item) => ({ text: `${item.id === active ? "✓ " : ""}${item.label}`, callback_data: `style:${item.id}` }));
+  const rows = [];
+  for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  return { inline_keyboard: rows };
 }
 
 function authorizedRunner(request, env) {
@@ -68,6 +54,14 @@ function authorizedRunner(request, env) {
   const header = request.headers.get("authorization") || "";
   return Boolean(token && header === `Bearer ${token}`);
 }
+
+// Все ссылки Dropbox / OneDrive из сообщения.
+function extractExternalVideoUrls(text) {
+  const found = String(text || "").match(/https?:\/\/[^\s<>"')]+/g) || [];
+  return [...new Set(found.map((value) => value.replace(/[.,;]+$/, "")).filter((value) => /dropbox\.com|1drv\.ms|onedrive\.live\.com/i.test(value)))];
+}
+
+const isFolderLink = (url) => /dropbox\.com\/(scl\/fo\/|sh\/)/i.test(url);
 
 function isVideo(message) {
   if (message?.video?.file_id) return { fileId: message.video.file_id, name: message.video.file_name || "video.mp4", size: message.video.file_size };
@@ -78,13 +72,6 @@ function isVideo(message) {
   return null;
 }
 
-function isExternalVideoUrl(text) {
-  const value = text.trim().replace(/[)>.,]+$/, "");
-  if (!/^https?:\/\//i.test(value)) return null;
-  if (!/dropbox\.com|1drv\.ms|onedrive\.live\.com/i.test(value)) return null;
-  return value;
-}
-
 async function getJobs(env, chatId) {
   const listed = await env.STATE.list({ prefix: "job:", limit: 100 });
   const found = [];
@@ -93,6 +80,72 @@ async function getJobs(env, chatId) {
     if (job && job.chatId === chatId) found.push(job);
   }
   return found.sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
+}
+
+const freshSession = (previous) => ({ sources: [], inserts: [], plates: [], createdAt: Date.now(), style: previous?.style || DEFAULT_STYLE });
+
+// ---------- Вставки (гифки и видео поверх ролика) и плашки ----------
+const INSERT_WORD = /^(\/insert|\/вставка|вставка)(@\w+)?(\s|$)/i;
+const PLATE_WORD = /^(\/plate|\/плашка|плашка)(@\w+)?(\s|$)/i;
+const num = (value) => Number(String(value).replace(",", "."));
+
+// «вставка 5 3 на весь экран» → { at: 5, dur: 3, mode: "full" }. Всё необязательно.
+function parseInsertArgs(raw) {
+  const text = String(raw || "").replace(/https?:\/\/\S+/g, " ").toLowerCase();
+  const numbers = (text.match(/\d+(?:[.,]\d+)?/g) || []).map(num);
+  const args = {};
+  if (numbers.length >= 1) args.at = numbers[0];
+  if (numbers.length >= 2 && numbers[1] > 0) args.dur = Math.min(numbers[1], 10);
+  if (/весь|полн|full/.test(text)) args.mode = "full";
+  else if (/налож|поверх|угол|overlay|pip/.test(text)) args.mode = "overlay";
+  return args;
+}
+
+// «плашка 2 Мой секрет» или «плашка 2-5 Мой секрет» → { at: 2, dur: 3, text: "Мой секрет" }.
+function parsePlate(raw) {
+  const body = String(raw || "").trim();
+  const m = body.match(/^(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*(\d+(?:[.,]\d+)?))?\s+([\s\S]+)$/);
+  if (m) {
+    const at = num(m[1]);
+    const dur = m[2] ? Math.max(0.8, num(m[2]) - at) : 2.5;
+    return { at, dur: Math.min(dur, 10), text: m[3].trim().slice(0, 90) };
+  }
+  return body ? { at: 0.3, dur: 3, text: body.slice(0, 90) } : null;
+}
+
+// Что пришло: гифка (в Telegram это «animation»), видео или картинка-гифка файлом.
+function insertMedia(message) {
+  if (message?.animation?.file_id) {
+    return { fileId: message.animation.file_id, name: message.animation.file_name || "insert.mp4", size: message.animation.file_size, kind: "gif" };
+  }
+  const document = message?.document;
+  if (document?.file_id && String(document.mime_type || "") === "image/gif") {
+    return { fileId: document.file_id, name: document.file_name || "insert.gif", size: document.file_size, kind: "gif" };
+  }
+  const video = isVideo(message);
+  return video ? { ...video, kind: "video" } : null;
+}
+
+const describeInsert = (item) => {
+  const parts = [item.mode === "full" ? "на весь экран" : item.mode === "overlay" ? "поверх ролика" : (item.kind === "gif" ? "поверх ролика" : "на весь экран")];
+  parts.push(item.at == null ? "время подберу сама" : `с ${item.at} сек`);
+  if (item.dur) parts.push(`${item.dur} сек`);
+  return parts.join(", ");
+};
+
+async function saveSession(env, chatId, session) {
+  await env.STATE.put(`session:${chatId}`, JSON.stringify(session), { expirationTtl: SESSION_TTL });
+}
+
+// Кладёт файл либо в исходники, либо в референс (если перед этим была команда «референс»).
+function acceptItem(session, item) {
+  if (session.awaitingReference) {
+    session.reference = item;
+    session.awaitingReference = false;
+    return "reference";
+  }
+  session.sources.push(item);
+  return "source";
 }
 
 async function handleTelegram(request, env) {
@@ -114,138 +167,205 @@ async function handleTelegram(request, env) {
     return new Response("ok");
   }
 
+  const sessionKey = `session:${chatId}`;
+  let session = await env.STATE.get(sessionKey, "json");
+
+  // Нажатие кнопки выбора стиля.
   if (update.callback_query?.data?.startsWith("style:")) {
-    const selected = Object.values(CAPTION_STYLES).find((item) => item.id === update.callback_query.data.slice(6));
+    const selected = styleById(update.callback_query.data.slice(6));
     if (selected) {
-      const callbackSessionKey = `session:${chatId}`;
-      const callbackSession = (await env.STATE.get(callbackSessionKey, "json")) || { sources: [], createdAt: Date.now() };
-      callbackSession.style = selected.id;
-      await env.STATE.put(callbackSessionKey, JSON.stringify(callbackSession), { expirationTtl: SESSION_TTL });
-      await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: `Выбрано: ${selected.id}` });
-      await sendMessage(env, chatId, `Стиль выбран: ${selected.label}. Теперь отправь видео/ссылку или напиши «собери».`);
+      session ||= freshSession();
+      session.style = selected.id;
+      await saveSession(env, chatId, session);
+      await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: `Выбрано: ${selected.label}` });
+      await sendMessage(env, chatId, `Стиль выбран: ${selected.label}. Теперь отправь видео или ссылку, либо напиши «собери».`);
     }
     return new Response("ok");
   }
-
-  if (update.callback_query?.data?.startsWith("montage:")) {
-    const selected = update.callback_query.data.slice(8);
-    if (MONTAGE_PRESETS[selected]) {
-      const callbackSessionKey = `session:${chatId}`;
-      const callbackSession = (await env.STATE.get(callbackSessionKey, "json")) || { sources: [], createdAt: Date.now() };
-      callbackSession.montage = selected;
-      await env.STATE.put(callbackSessionKey, JSON.stringify(callbackSession), { expirationTtl: SESSION_TTL });
-      await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: `Монтаж: ${selected}` });
-      await sendMessage(env, chatId, `Выбрано: ${MONTAGE_PRESETS[selected]}. Теперь можно собрать сразу или добавить ещё исходники.`, actionKeyboard());
-    }
-    return new Response("ok");
-  }
-
-  if (update.callback_query?.data === "render:add") {
-    await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: "Можно добавить ещё видео" });
-    await sendMessage(env, chatId, "Хорошо. Пришли ещё видео или ссылку Dropbox/OneDrive.");
-    return new Response("ok");
-  }
-
-  if (update.callback_query?.data === "render:now") {
-    const callbackSessionKey = `session:${chatId}`;
-    const callbackSession = await env.STATE.get(callbackSessionKey, "json");
-    if (!callbackSession?.sources?.length) {
-      await sendMessage(env, chatId, "Сначала пришли хотя бы одно видео.");
-      return new Response("ok");
-    }
-    const id = `RB-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
-    const montage = callbackSession.montage || "clean";
-    const job = { id, chatId, sources: callbackSession.sources, style: callbackSession.style || "glass", montage, status: "queued", createdAt: Date.now(), attempts: 0 };
-    await env.STATE.put(`job:${id}`, JSON.stringify(job), { expirationTtl: JOB_TTL });
-    await env.STATE.delete(callbackSessionKey);
-    await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: "Задача отправлена в монтаж" });
-    await sendMessage(env, chatId, `Собираю сейчас. Режим: ${MONTAGE_PRESETS[montage]}. Субтитры и очистка речи будут применены.`);
+  if (update.callback_query) {
+    await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id });
     return new Response("ok");
   }
 
   const text = String(update.message?.text || "").trim();
   const normalized = text.toLowerCase();
-  const sessionKey = `session:${chatId}`;
-  let session = await env.STATE.get(sessionKey, "json");
-
-  if (normalized === "/styles" || normalized === "стили") {
-    await sendMessage(env, chatId, captionStyleHelp(), captionStyleKeyboard());
-    return new Response("ok");
-  }
-
-  const styleMatch = normalized.match(/^(?:\/style|стиль)\s*([1-6])$/);
-  if (styleMatch) {
-    const choice = CAPTION_STYLES[styleMatch[1]];
-    session ||= { sources: [], createdAt: Date.now() };
-    session.style = choice.id;
-    await env.STATE.put(sessionKey, JSON.stringify(session), { expirationTtl: SESSION_TTL });
-    await sendMessage(env, chatId, `Стиль выбран: ${choice.label}. Теперь отправь видео или напиши /new для нового проекта.`);
-    return new Response("ok");
-  }
 
   if (normalized === "/start" || normalized === "/help") {
-    await sendMessage(env, chatId, "Привет! Я закрытый ReelBot. Отправь /new, выбери стиль через /styles, затем одно или несколько видео (до 20 МБ каждое), потом напиши «собери». Я сделаю вертикальный ролик с русскими субтитрами, удалением длинных пауз и нормализацией звука.");
+    await sendMessage(env, chatId, "Привет! Я закрытый ReelBot.\n\n/new — новый проект\n/styles — выбрать стиль субтитров\n/ref — прислать референс (зум возьму из него)\n/insert — вставка: гифка или видео поверх ролика\n/plate — плашка с текстом\n/clear — убрать все вставки и плашки\n\nПришли видео (до 20 МБ) или ссылки Dropbox/OneDrive на файлы (до 20 штук), потом напиши «собери». Я сделаю вертикальный ролик с субтитрами, удалением пауз, зумами и нормализацией звука, а потом скажу, сильный ли хук.\n\nВставки: напиши «вставка 5» и пришли гифку или видео (5 — секунда в готовом ролике). «вставка 5 3» — на 3 секунды. «вставка 5 на весь экран» или «вставка 5 поверх». Без цифр — поставлю сама. Можно просто отправить гифку с такой подписью.\nПлашки: «плашка 2 Мой секрет» или «плашка 2-5 Мой секрет» (с 2-й по 5-ю секунду).");
+    return new Response("ok");
+  }
+
+  if (normalized === "/styles" || normalized === "стили") {
+    session ||= freshSession();
+    await saveSession(env, chatId, session);
+    await sendMessage(env, chatId, `Выбери стиль субтитров. Сейчас: ${styleById(session.style || DEFAULT_STYLE)?.label}.`, captionStyleKeyboard(session.style || DEFAULT_STYLE));
     return new Response("ok");
   }
 
   if (normalized === "/new" || normalized === "новый монтаж") {
-    await env.STATE.put(sessionKey, JSON.stringify({ sources: [], style: "glass", createdAt: Date.now() }), { expirationTtl: SESSION_TTL });
-    await sendMessage(env, chatId, "Новый проект готов. Сначала выбери стиль через /styles, затем отправь исходное видео (до 20 МБ). Можно прислать несколько, потом напиши «собери».");
+    await saveSession(env, chatId, freshSession(session));
+    await sendMessage(env, chatId, "Новый проект готов. Отправь исходное видео (до 20 МБ) или ссылку Dropbox/OneDrive. Можно несколько, затем напиши «собери». Стиль субтитров: /styles. Референс: /ref. Вставки: /insert. Плашки: /plate.");
+    return new Response("ok");
+  }
+
+  if (normalized === "/ref" || (normalized.includes("референс") && !normalized.includes("без"))) {
+    session ||= freshSession();
+    session.awaitingReference = true;
+    await saveSession(env, chatId, session);
+    await sendMessage(env, chatId, "Пришли видео-референс (до 20 МБ) или ссылку Dropbox/OneDrive. Зум возьму оттуда.");
     return new Response("ok");
   }
 
   if (normalized === "/queue" || normalized === "моя очередь") {
     const jobs = await getJobs(env, chatId);
     if (!jobs.length) await sendMessage(env, chatId, "Очередь пока пустая. Отправь /new, чтобы начать.");
-    else await sendMessage(env, chatId, `Последние задачи:\n${jobs.map(j => `• ${j.id} — ${j.status === "queued" ? "ожидает запуска" : j.status === "processing" ? "монтируется" : j.status === "ready" ? "готово" : "ошибка"}`).join("\n")}`);
+    else await sendMessage(env, chatId, `Последние задачи:\n${jobs.map((j) => `• ${j.id} — ${j.status === "queued" ? "ожидает запуска" : j.status === "processing" ? "монтируется" : j.status === "ready" ? "готово" : "ошибка"}`).join("\n")}`);
     return new Response("ok");
   }
 
-  const externalUrl = isExternalVideoUrl(text);
-  if (externalUrl) {
-    session ||= { sources: [], createdAt: Date.now() };
-    session.sources ||= [];
-    if (session.sources.length >= 20) {
-      await sendMessage(env, chatId, "В одном проекте можно обработать до 20 ссылок. Напиши «собери» или начни новый через /new.");
+  if (normalized === "/clear" || normalized === "убери вставки") {
+    session ||= freshSession();
+    session.inserts = [];
+    session.plates = [];
+    session.awaitingInsert = null;
+    await saveSession(env, chatId, session);
+    await sendMessage(env, chatId, "Вставки и плашки убрала.");
+    return new Response("ok");
+  }
+
+  if (PLATE_WORD.test(text)) {
+    session ||= freshSession();
+    session.plates ||= [];
+    const plate = parsePlate(text.replace(PLATE_WORD, ""));
+    if (!plate) {
+      await sendMessage(env, chatId, "Напиши текст плашки. Например: «плашка 2 Мой секрет» или «плашка 2-5 Мой секрет».");
       return new Response("ok");
     }
-    session.sources.push({ url: externalUrl, name: "cloud-video.mp4" });
-    await env.STATE.put(sessionKey, JSON.stringify(session), { expirationTtl: SESSION_TTL });
-    await sendMessage(env, chatId, `Ссылка принята (${session.sources.length}/20).`, actionKeyboard());
-    await sendMessage(env, chatId, montageHelp(), montageKeyboard());
+    if (session.plates.length >= MAX_PLATES) {
+      await sendMessage(env, chatId, `Максимум ${MAX_PLATES} плашек. Убрать всё: /clear.`);
+      return new Response("ok");
+    }
+    session.plates.push(plate);
+    await saveSession(env, chatId, session);
+    await sendMessage(env, chatId, `Плашка ${session.plates.length} принята: «${plate.text}», с ${plate.at} по ${Math.round((plate.at + plate.dur) * 10) / 10} сек. Ещё что-то добавить или «собери».`);
+    return new Response("ok");
+  }
+
+  if (INSERT_WORD.test(text)) {
+    session ||= freshSession();
+    session.inserts ||= [];
+    const rest = text.replace(INSERT_WORD, "");
+    const link = (rest.match(/https?:\/\/[^\s<>"')]+/) || [])[0];
+    const args = parseInsertArgs(rest);
+    if (link) {
+      if (session.inserts.length >= MAX_INSERTS) {
+        await sendMessage(env, chatId, `Максимум ${MAX_INSERTS} вставок. Убрать всё: /clear.`);
+        return new Response("ok");
+      }
+      const item = { url: link.replace(/[.,;]+$/, ""), name: /\.gif(\?|$)/i.test(link) ? "insert.gif" : "insert.mp4", kind: /\.gif(\?|$)|giphy|tenor/i.test(link) ? "gif" : "video", ...args };
+      session.inserts.push(item);
+      await saveSession(env, chatId, session);
+      await sendMessage(env, chatId, `Вставка ${session.inserts.length} принята (${describeInsert(item)}). Ещё одну или «собери».`);
+    } else {
+      session.awaitingInsert = args;
+      await saveSession(env, chatId, session);
+      await sendMessage(env, chatId, "Пришли гифку, видео или ссылку на гифку. Это будет вставка.");
+    }
+    return new Response("ok");
+  }
+
+  // Гифка, видео или ссылка после команды «вставка» (или гифка/видео с подписью «вставка 5»).
+  {
+    const media = insertMedia(message);
+    const caption = String(update.message?.caption || "").trim();
+    const captionIsInsert = INSERT_WORD.test(caption);
+    const anyLink = (text.match(/https?:\/\/[^\s<>"')]+/) || [])[0];
+    const waiting = Boolean(session?.awaitingInsert);
+    const asInsert = (media && (media.kind === "gif" || waiting || captionIsInsert)) || (waiting && anyLink);
+    if (asInsert) {
+      session ||= freshSession();
+      session.inserts ||= [];
+      if (session.inserts.length >= MAX_INSERTS) {
+        await sendMessage(env, chatId, `Максимум ${MAX_INSERTS} вставок. Убрать всё: /clear.`);
+        return new Response("ok");
+      }
+      if (media && Number(media.size || 0) > MAX_INPUT_BYTES) {
+        await sendMessage(env, chatId, "Файл больше 20 МБ. Пришли файл поменьше или ссылку.");
+        return new Response("ok");
+      }
+      const args = { ...(session.awaitingInsert || {}), ...parseInsertArgs(caption.replace(INSERT_WORD, "")) };
+      const base = media
+        ? { fileId: media.fileId, name: media.name, kind: media.kind }
+        : { url: anyLink.replace(/[.,;]+$/, ""), name: /\.gif(\?|$)/i.test(anyLink) ? "insert.gif" : "insert.mp4", kind: /\.gif(\?|$)|giphy|tenor/i.test(anyLink) ? "gif" : "video" };
+      const item = { ...base, ...args };
+      session.inserts.push(item);
+      session.awaitingInsert = null;
+      await saveSession(env, chatId, session);
+      await sendMessage(env, chatId, `Вставка ${session.inserts.length} принята (${describeInsert(item)}). Ещё одну или «собери».`);
+      return new Response("ok");
+    }
+  }
+
+  const urls = extractExternalVideoUrls(text);
+  if (urls.length) {
+    session ||= freshSession();
+    session.sources ||= [];
+    const folder = urls.find(isFolderLink);
+    if (folder && urls.length === 1) {
+      await sendMessage(env, chatId, "Это ссылка на папку Dropbox. Пришли ссылки на отдельные видеофайлы.");
+      return new Response("ok");
+    }
+    let addedSources = 0;
+    let addedReference = false;
+    for (const url of urls.filter((value) => !isFolderLink(value))) {
+      if (!session.awaitingReference && session.sources.length >= MAX_SOURCES) break;
+      const kind = acceptItem(session, { url, name: "cloud-video.mp4" });
+      if (kind === "reference") addedReference = true; else addedSources += 1;
+    }
+    await saveSession(env, chatId, session);
+    const parts = [];
+    if (addedReference) parts.push("Референс принят.");
+    if (addedSources) parts.push(`Ссылок принято: ${addedSources} (всего ${session.sources.length}/${MAX_SOURCES}).`);
+    if (session.sources.length >= MAX_SOURCES) parts.push("Это максимум на проект.");
+    if (folder) parts.push("Ссылку на папку пропустила, нужны ссылки на файлы.");
+    parts.push("Пришли ещё или напиши «собери».");
+    await sendMessage(env, chatId, parts.join(" "));
     return new Response("ok");
   }
 
   const source = isVideo(message);
   if (source) {
     if (Number(source.size || 0) > MAX_INPUT_BYTES) {
-      await sendMessage(env, chatId, "Файл больше 20 МБ. Для этого бесплатного варианта пришли видео размером до 20 МБ.");
+      await sendMessage(env, chatId, "Файл больше 20 МБ. Пришли ссылку Dropbox или OneDrive на этот файл, либо видео до 20 МБ.");
       return new Response("ok");
     }
-    session ||= { sources: [], createdAt: Date.now() };
+    session ||= freshSession();
     session.sources ||= [];
-    if (session.sources.length >= 20) {
-      await sendMessage(env, chatId, "В одном проекте можно обработать не больше 20 исходников. Выбери режим и нажми «Собрать сейчас».");
+    if (!session.awaitingReference && session.sources.length >= MAX_SOURCES) {
+      await sendMessage(env, chatId, `В одном проекте максимум ${MAX_SOURCES} исходников. Напиши «собери» или начни новый через /new.`);
       return new Response("ok");
     }
-    session.sources.push({ fileId: source.fileId, name: source.name });
-    await env.STATE.put(sessionKey, JSON.stringify(session), { expirationTtl: SESSION_TTL });
-    await sendMessage(env, chatId, `Видео принято (${session.sources.length}/20).`, actionKeyboard());
-    await sendMessage(env, chatId, captionStyleHelp(), captionStyleKeyboard());
-    await sendMessage(env, chatId, montageHelp(), montageKeyboard());
+    const kind = acceptItem(session, { fileId: source.fileId, name: source.name });
+    await saveSession(env, chatId, session);
+    if (kind === "reference") {
+      await sendMessage(env, chatId, "Референс принят. Теперь пришли исходные видео.");
+    } else {
+      await sendMessage(env, chatId, `Видео принято (${session.sources.length}/${MAX_SOURCES}). Выбери стиль субтитров, пришли ещё видео или напиши «собери».`, captionStyleKeyboard(session.style || DEFAULT_STYLE));
+    }
     return new Response("ok");
   }
 
   if (["собери", "собрать", "/render", "/собери"].includes(normalized)) {
     if (!session?.sources?.length) {
-      await sendMessage(env, chatId, "Сначала отправь /new и хотя бы одно видео.");
+      await sendMessage(env, chatId, "Сначала отправь /new и хотя бы одно видео или ссылку.");
       return new Response("ok");
     }
     const id = `RB-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
-    const job = { id, chatId, sources: session.sources, style: session.style || "glass", montage: session.montage || "clean", status: "queued", createdAt: Date.now(), attempts: 0 };
+    const style = session.style || DEFAULT_STYLE;
+    const job = { id, chatId, sources: session.sources, reference: session.reference || null, inserts: session.inserts || [], plates: session.plates || [], style, status: "queued", createdAt: Date.now(), attempts: 0 };
     await env.STATE.put(`job:${id}`, JSON.stringify(job), { expirationTtl: JOB_TTL });
-    await env.STATE.delete(sessionKey);
-    await sendMessage(env, chatId, `Задача ${id} сохранена. Облачный runner заберёт её при ближайшем запуске; статус можно проверить командой /queue.`);
+    await env.STATE.put(sessionKey, JSON.stringify({ ...freshSession(session) }), { expirationTtl: SESSION_TTL });
+    await sendMessage(env, chatId, `Задача ${id} сохранена. Стиль: ${styleById(style)?.label}.${job.reference ? " Зум возьму из референса." : ""}${job.inserts.length ? ` Вставок: ${job.inserts.length}.` : ""}${job.plates.length ? ` Плашек: ${job.plates.length}.` : ""} Монтаж стартует в течение нескольких минут, готовый ролик пришлю сюда. Статус: /queue.`);
     return new Response("ok");
   }
 
@@ -260,18 +380,31 @@ async function handleRunner(request, env, url) {
   if (!env.STATE) return json({ error: "storage_not_configured" }, 503);
 
   if (url.pathname === "/runner/activate" && request.method === "POST") {
-    const marker = await env.STATE.get("config:webhook-active", "json");
+    const marker = await env.STATE.get(WEBHOOK_MARKER, "json");
     if (!marker || Date.now() - marker.setAt > 12 * 60 * 60 * 1000) {
       const origin = new URL(request.url).origin;
       await telegram(env, "setWebhook", {
         url: `${origin}/telegram`,
         secret_token: env.TELEGRAM_WEBHOOK_SECRET,
         drop_pending_updates: false,
-        allowed_updates: ["message"],
+        // callback_query нужен, иначе нажатия кнопок выбора стиля до бота не доходят.
+        allowed_updates: ["message", "callback_query"],
       });
-      await env.STATE.put("config:webhook-active", JSON.stringify({ setAt: Date.now() }), { expirationTtl: 24 * 60 * 60 });
+      await env.STATE.put(WEBHOOK_MARKER, JSON.stringify({ setAt: Date.now() }), { expirationTtl: 24 * 60 * 60 });
     }
     return json({ ok: true });
+  }
+
+  // Дешёвая проверка «есть ли что монтировать» — чтобы расписание не ставило тяжёлые программы зря.
+  if (url.pathname === "/runner/peek" && request.method === "POST") {
+    const listed = await env.STATE.list({ prefix: "job:", limit: 100 });
+    let pending = 0;
+    for (const key of listed.keys) {
+      const job = await env.STATE.get(key.name, "json");
+      if (!job) continue;
+      if (job.status === "queued" || (job.status === "processing" && Date.now() - Number(job.claimedAt || 0) > 60 * 60 * 1000)) pending += 1;
+    }
+    return json({ pending });
   }
 
   if (url.pathname === "/runner/next" && request.method === "POST") {
@@ -364,14 +497,14 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ status: "ok", service: "reelbot-gateway", storageConfigured: Boolean(env.STATE), privateBot: true });
+      return json({ status: "ok", service: "reelbot-gateway", version: 4, storageConfigured: Boolean(env.STATE), privateBot: true });
     }
     try {
       if (url.pathname === "/telegram" && request.method === "POST") return await handleTelegram(request, env);
       if (url.pathname.startsWith("/runner/")) return await handleRunner(request, env, url);
       return new Response("Not found", { status: 404 });
     } catch (error) {
-      // Keep request bodies, identifiers, and credentials out of logs.
+      // Тела запросов, идентификаторы и токены в логи не попадают.
       console.error("[ReelBot] request failed", error instanceof Error ? error.message : "unknown error");
       return json({ error: "request_failed" }, 500);
     }

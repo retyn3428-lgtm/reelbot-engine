@@ -1,4 +1,4 @@
-name: ReelBot free runner
+name: ReelBot runner
 
 on:
   workflow_dispatch:
@@ -21,43 +21,35 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.18.0
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Cache Whisper packages
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Cache faster-whisper model
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
-          key: whisper-pip-${{ runner.os }}-py311-v1
-      - name: Cache Whisper model
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/whisper
-          key: whisper-tiny-v1
+          path: ~/.cache/huggingface/hub
+          key: faster-whisper-small-${{ runner.os }}-v1
+
       - name: Ensure FFmpeg is installed
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y ffmpeg
           fi
-      - name: Install Whisper
-        run: python3 -m pip install --user --upgrade --cache-dir "$HOME/.cache/pip" openai-whisper
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Claim one render job through the private Worker gateway
+
+      - name: Install runner dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Claim and render queued jobs
         env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL || 'https://reelbot-gateway.retyn-reelbot.workers.dev' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          REELBOT_GATEWAY_URL: https://reelbot-gateway.retyn-reelbot.workers.dev
-          WHISPER_MODEL: tiny
-          NODE_ENV: production
-        run: pnpm exec tsx runner/poll.ts
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WHISPER_MODEL: small
+          HOOK_MODEL: claude-sonnet-5-5
+        run: python runner.py
