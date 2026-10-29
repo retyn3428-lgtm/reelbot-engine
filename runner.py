@@ -18,6 +18,7 @@ import time
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
+from PIL import ImageFont
 
 GATEWAY = os.environ.get("GATEWAY_URL", "").rstrip("/")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -36,6 +37,8 @@ STYLES = {
     "olive": dict(label="Olive", plate="2F3924", op=0.85, text="FFFFFF", key="plate", key_plate="C6D59A", key_text="2F3924"),
     "echo": dict(label="Echo", plate="202020", op=0.54, text="FFFFFF", key="none", echo=True),
     "mixed": dict(label="Mixed Key Words", plate="202020", op=0.6, text="FFFFFF", key="word", accents=["FF4FA3", "F2D44E"]),
+    "shifted": dict(label="Бордовая со сдвигом", plate="301020", op=0.92, text="FFFFFF", key="none", custom="shifted", font_size=60),
+    "clean": dict(label="Белый текст без плашки", plate="000000", op=0.0, text="FFFFFF", key="none", custom="clean", font_size=62),
 }
 
 
@@ -477,6 +480,57 @@ def style_line(name, text, plate, opacity, bold=True):
             f"{ass_color('000000', 0.5)},{-1 if bold else 0},0,0,0,100,100,0,0,3,18,0,2,90,90,430,1")
 
 
+def caption_text_style_line(st):
+    """ASS text without a full-line plate; use a compact black outline and light shadow."""
+    size = st.get("font_size", 60)
+    alignment = 5 if st.get("custom") == "shifted" else 2
+    margin_v = 0 if alignment == 5 else 430
+    return (f"Style: Base,DejaVu Sans,{size},{ass_color(st['text'])},{ass_color(st['text'])},"
+            f"{ass_color('000000')},{ass_color('000000', 0)},-1,0,0,0,100,100,0,0,1,1.5,0.8,"
+            f"{alignment},70,70,{margin_v},1")
+
+
+def _caption_text_width(text, font_size):
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    try:
+        font = ImageFont.truetype(font_path, font_size)
+        return int(math.ceil(font.getlength(text)))
+    except Exception:
+        return int(math.ceil(len(text) * font_size * 0.58))
+
+
+def _rounded_rect_path(width, height, radius):
+    r = max(1, min(radius, width // 2, height // 2))
+    k = round(r * 0.55228475, 2)
+    return (f"m {r} 0 l {width-r} 0 "
+            f"b {width-r+k} 0 {width} {r-k} {width} {r} "
+            f"l {width} {height-r} b {width} {height-r+k} {width-r+k} {height} {width-r} {height} "
+            f"l {r} {height} b {r-k} {height} 0 {height-r+k} 0 {height-r} "
+            f"l 0 {r} b 0 {r-k} {r-k} 0 {r} 0")
+
+
+def shifted_caption_events(group, wrapped, st):
+    """Draw a rounded berry card slightly offset behind white text in the lower safe zone."""
+    lines = [" ".join(line) for line in wrapped if line]
+    if not lines:
+        return []
+    size = st.get("font_size", 60)
+    width = min(980, max(170, max(_caption_text_width(line, size) for line in lines) + 44))
+    height = len(lines) * int(size * 1.18) + 24
+    x = max(30, min(1080 - width - 30, int(540 - width / 2 + 18)))
+    y = max(240, min(1600 - height, int(1410 - height / 2 + 9)))
+    path = _rounded_rect_path(width, height, 24)
+    start, end = ass_time(group["start"]), ass_time(group["end"])
+    color = ass_bgr(st["plate"])
+    alpha = f"{round((1 - st.get('op', 0.92)) * 255):02X}"
+    shape = (f"Dialogue: 0,{start},{end},Base,,0,0,0,,"
+             f"{{\\an7\\pos({x},{y})\\p1\\bord0\\shad0\\1c{color}\\1a&H{alpha}&}}{path}{{\\p0}}")
+    text = ass_text("\n".join(lines))
+    caption = (f"Dialogue: 1,{start},{end},Base,,0,0,0,,"
+               f"{{\\an5\\pos(540,1410)}}{text}")
+    return [shape, caption]
+
+
 def is_key(group, index):
     return index == 0 or (index % 3 == 0 and max(len(w) for w in group["words"]) >= 6)
 
@@ -491,7 +545,8 @@ def plate_style_line(st):
 
 def make_ass(groups, style_id, plates=None):
     st = STYLES[style_id]
-    styles = [style_line("Base", st["text"], st["plate"], st["op"], bold=st.get("bold", True)), plate_style_line(st)]
+    base_style = caption_text_style_line(st) if st.get("custom") else style_line("Base", st["text"], st["plate"], st["op"], bold=st.get("bold", True))
+    styles = [base_style, plate_style_line(st)]
     if st["key"] == "plate":
         styles.append(style_line("Key", st["key_text"], st["key_plate"], 0.95, bold=st.get("bold", True)))
     header = ("[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n"
@@ -505,9 +560,13 @@ def make_ass(groups, style_id, plates=None):
         if ptext:
             lines.append(f"Dialogue: 2,{ass_time(pl['at'])},{ass_time(pl['at'] + pl['dur'])},Plate,,0,0,0,,{{\\fad(150,150)}}{ptext}")
     for i, g in enumerate(groups):
-        wrapped = wrap_caption_words(g.get("words") or g.get("text", "").split())
+        words = g.get("words") or g.get("text", "").split()
+        wrapped = wrap_caption_words(words, max_chars=24 if st.get("custom") else CAPTION_MAX_LINE_CHARS)
         display_text = "\n".join(" ".join(line) for line in wrapped)
         s, e, text = ass_time(g["start"]), ass_time(g["end"]), ass_text(display_text)
+        if st.get("custom") == "shifted":
+            lines.extend(shifted_caption_events(g, wrapped, st))
+            continue
         if st.get("echo"):
             lines.append(f"Dialogue: 0,{s},{e},Base,,0,0,0,,{{\\pos(540,1466)\\alpha&H99&}}{text}")
             lines.append(f"Dialogue: 1,{s},{e},Base,,0,0,0,,{{\\pos(540,1490)}}{text}")
@@ -862,20 +921,20 @@ def hook_message(segments):
             d = hook_with_ai(full, first)
             variants = "\n".join(f"{i + 1}) {v}" for i, v in enumerate(d.get("variants", [])[:3]))
             return (f"Хук: «{first}»\nОценка: {d.get('score', '?')}/10, {d.get('verdict', '')}.\n{d.get('why', '')}\n\n"
-                    f"Варианты хука:\n{variants}")
+                    f"Варианты хука:\n{variants}\n\n"
+                    "Важно: это разбор текста вашего ролика, бот не открывал Instagram и не сравнивал его с чужими видео.")
         except Exception as exc:
             print("разбор хука через ИИ не получился:", exc)
-    score, notes = hook_heuristic(first, first_start)
-    verdict = "сильный" if score >= 6 else "слабый"
-    extra = ("\nПочему: " + ", ".join(notes) + ".") if notes else ""
-    return (f"Хук: «{first}»\nОценка: {score}/10, {verdict} (быстрая проверка по правилам).{extra}\n"
-            "Чтобы бот предлагал 2–3 готовых варианта хука, нужно добавить ключ ANTHROPIC_API_KEY.")
+    _, notes = hook_heuristic(first, first_start)
+    extra = ("\nНа что обратить внимание: " + ", ".join(notes) + ".") if notes else ""
+    return (f"Хук: «{first}»\nПока могу дать только короткую предварительную проверку.{extra}\n"
+            "Это не экспертная оценка и бот не искал похожие ролики в Instagram.")
 
 
 # ---------- Одна задача ----------
 def process(job):
     chat = job["chatId"]
-    style = job.get("style") if job.get("style") in STYLES else "glass"
+    style = job.get("style") if job.get("style") in STYLES else "shifted"
     workdir = tempfile.mkdtemp(prefix="reelbot-")
     try:
         sources = job.get("sources") or []

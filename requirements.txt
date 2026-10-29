@@ -2,3 +2,4 @@ requests
 numpy
 opencv-python-headless
 faster-whisper
+Pillow

@@ -15,8 +15,10 @@ const CAPTION_STYLES = {
   4: { id: "olive", label: "Olive" },
   5: { id: "echo", label: "Echo" },
   6: { id: "mixed", label: "Mixed Key Words" },
+  7: { id: "shifted", label: "Бордовая со сдвигом" },
+  8: { id: "clean", label: "Белый текст без плашки" },
 };
-const DEFAULT_STYLE = "glass";
+const DEFAULT_STYLE = "shifted";
 const styleById = (id) => Object.values(CAPTION_STYLES).find((item) => item.id === id);
 
 function json(data, status = 200) {
