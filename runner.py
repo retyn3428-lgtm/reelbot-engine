@@ -30,6 +30,14 @@ TIME_BUDGET = 40 * 60
 MAX_ATTEMPTS = 3
 
 # ---------- Стили субтитров ----------
+FONT_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
+CAPTION_FONTS = {
+    "inter": {"name": "Inter", "path": os.path.join(FONT_DIR, "Inter[opsz,wght].ttf"), "axes": [14, 700]},
+    "montserrat": {"name": "Montserrat", "path": os.path.join(FONT_DIR, "Montserrat[wght].ttf"), "axes": [700]},
+    "oswald": {"name": "Oswald", "path": os.path.join(FONT_DIR, "Oswald[wght].ttf"), "axes": [700]},
+}
+DEFAULT_CAPTION_FONT = "montserrat"
+
 STYLES = {
     "glass": dict(label="Glass", plate="000000", op=0.6, text="FFFFFF", key="none", bold=False),
     "powder": dict(label="Powder", plate="E8B8C8", op=0.95, text="FFFFFF", key="none"),
@@ -37,8 +45,12 @@ STYLES = {
     "olive": dict(label="Olive", plate="2F3924", op=0.85, text="FFFFFF", key="plate", key_plate="C6D59A", key_text="2F3924"),
     "echo": dict(label="Echo", plate="202020", op=0.54, text="FFFFFF", key="none", echo=True),
     "mixed": dict(label="Mixed Key Words", plate="202020", op=0.6, text="FFFFFF", key="word", accents=["FF4FA3", "F2D44E"]),
-    "shifted": dict(label="Бордовая со сдвигом", plate="301020", op=0.92, text="FFFFFF", key="none", custom="shifted", font_size=60),
+    "shifted": dict(label="Бордовая со сдвигом", plate="4A0D25", op=0.6, text="FFFFFF", key="none", custom="shifted", font_size=62),
     "clean": dict(label="Белый текст без плашки", plate="000000", op=0.0, text="FFFFFF", key="none", custom="clean", font_size=62),
+    "karaoke_yellow": dict(label="Белая фраза + жёлтое активное слово", plate="000000", op=0.0, text="FFFFFF", key="none", custom="accent", accent="FFD84D", font_size=64),
+    "karaoke_pink": dict(label="Белая фраза + розовое активное слово", plate="000000", op=0.0, text="FFFFFF", key="none", custom="accent", accent="FF4FA3", font_size=64),
+    "karaoke_red": dict(label="Белая фраза + красное активное слово", plate="000000", op=0.0, text="FFFFFF", key="none", custom="accent", accent="F04452", font_size=64),
+    "glass_bar": dict(label="Тёмная прозрачная плашка", plate="24212B", op=0.6, text="FFFFFF", key="none", custom="glass", font_size=60),
 }
 
 
@@ -333,7 +345,8 @@ def group_words(segments):
         start = stored[0]["start"]
         end = max(stored[-1]["end"], start + CAPTION_MIN_SECONDS)
         tokens = [word["word"] for word in stored]
-        return {"start": start, "end": end, "words": tokens, "text": " ".join(tokens), "_items": stored}
+        word_times = [{"word": word["word"], "start": word["start"], "end": word["end"]} for word in stored]
+        return {"start": start, "end": end, "words": tokens, "text": " ".join(tokens), "wordTimes": word_times, "_items": stored}
 
     def flush():
         if not current:
@@ -427,6 +440,25 @@ def group_words(segments):
     return groups
 
 
+def apply_caption_edits(groups, edits):
+    """Replace only the caption phrase nearest to a user-specified output time."""
+    result = [dict(group, words=list(group.get("words", [])), wordTimes=list(group.get("wordTimes", []))) for group in groups]
+    for edit in edits or []:
+        try:
+            at = float(edit["at"])
+            replacement = str(edit["text"]).strip()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not replacement or not result:
+            continue
+        target = min(result, key=lambda group: abs((float(group["start"]) + float(group["end"])) / 2 - at))
+        tokens = replacement.split()
+        target["words"] = tokens
+        target["text"] = " ".join(tokens)
+        target["wordTimes"] = []
+    return result
+
+
 def wrap_caption_words(words, max_chars=CAPTION_MAX_LINE_CHARS):
     """Chooses a balanced two-line break and avoids leaving a short word at line end."""
     tokens = [str(w).strip() for w in words if str(w).strip()]
@@ -475,25 +507,37 @@ def ass_bgr(hex_):
     return f"&H{hex_[4:6]}{hex_[2:4]}{hex_[0:2]}&".upper()
 
 
-def style_line(name, text, plate, opacity, bold=True):
-    return (f"Style: {name},DejaVu Sans,58,{ass_color(text)},{ass_color(text)},{ass_color(plate, opacity)},"
+def style_line(name, text, plate, opacity, bold=True, font_name="DejaVu Sans", secondary=None):
+    return (f"Style: {name},{font_name},58,{ass_color(text)},{ass_color(secondary or text)},{ass_color(plate, opacity)},"
             f"{ass_color('000000', 0.5)},{-1 if bold else 0},0,0,0,100,100,0,0,3,18,0,2,90,90,430,1")
 
 
-def caption_text_style_line(st):
+def caption_text_style_line(st, font_name="DejaVu Sans"):
     """ASS text without a full-line plate; use a compact black outline and light shadow."""
     size = st.get("font_size", 60)
     alignment = 5 if st.get("custom") == "shifted" else 2
     margin_v = 0 if alignment == 5 else 430
-    return (f"Style: Base,DejaVu Sans,{size},{ass_color(st['text'])},{ass_color(st['text'])},"
+    return (f"Style: Base,{font_name},{size},{ass_color(st['text'])},{ass_color(st.get('accent') or st['text'])},"
             f"{ass_color('000000')},{ass_color('000000', 0)},-1,0,0,0,100,100,0,0,1,1.5,0.8,"
             f"{alignment},70,70,{margin_v},1")
 
 
-def _caption_text_width(text, font_size):
-    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+def caption_font_config(font_id=None):
+    return CAPTION_FONTS.get(font_id or DEFAULT_CAPTION_FONT, CAPTION_FONTS[DEFAULT_CAPTION_FONT])
+
+
+def _caption_text_width(text, font_size, font_path=None):
+    font_path = font_path or "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     try:
         font = ImageFont.truetype(font_path, font_size)
+        if hasattr(font, "get_variation_axes"):
+            values = []
+            for axis in font.get_variation_axes():
+                axis_name = axis.get("name", b"").decode("ascii", "ignore").lower()
+                value = 700 if axis_name == "weight" else axis.get("default", 0)
+                values.append(max(axis.get("minimum", value), min(axis.get("maximum", value), value)))
+            if values:
+                font.set_variation_by_axes(values)
         return int(math.ceil(font.getlength(text)))
     except Exception:
         return int(math.ceil(len(text) * font_size * 0.58))
@@ -509,16 +553,17 @@ def _rounded_rect_path(width, height, radius):
             f"l 0 {r} b 0 {r-k} {r-k} 0 {r} 0")
 
 
-def shifted_caption_events(group, wrapped, st):
-    """Draw a rounded berry card slightly offset behind white text in the lower safe zone."""
+def shifted_caption_events(group, wrapped, st, anchor=None, font_path=None):
+    """Draw one rounded, semi-transparent berry card, offset behind the phrase."""
     lines = [" ".join(line) for line in wrapped if line]
     if not lines:
         return []
     size = st.get("font_size", 60)
-    width = min(980, max(170, max(_caption_text_width(line, size) for line in lines) + 44))
+    width = min(980, max(170, max(_caption_text_width(line, size, font_path) for line in lines) + 44))
     height = len(lines) * int(size * 1.18) + 24
-    x = max(30, min(1080 - width - 30, int(540 - width / 2 + 18)))
-    y = max(240, min(1600 - height, int(1410 - height / 2 + 9)))
+    cx, cy = anchor or (540, 1410)
+    x = max(30, min(1080 - width - 30, int(cx - width / 2 + 18)))
+    y = max(240, min(1600 - height, int(cy - height / 2 + 9)))
     path = _rounded_rect_path(width, height, 24)
     start, end = ass_time(group["start"]), ass_time(group["end"])
     color = ass_bgr(st["plate"])
@@ -527,28 +572,180 @@ def shifted_caption_events(group, wrapped, st):
              f"{{\\an7\\pos({x},{y})\\p1\\bord0\\shad0\\1c{color}\\1a&H{alpha}&}}{path}{{\\p0}}")
     text = ass_text("\n".join(lines))
     caption = (f"Dialogue: 1,{start},{end},Base,,0,0,0,,"
-               f"{{\\an5\\pos(540,1410)}}{text}")
+               f"{{\\an5\\pos({cx},{cy})}}{text}")
     return [shape, caption]
+
+
+def glass_caption_events(group, wrapped, st, anchor=None, font_path=None):
+    """Draw an even, rounded dark glass bar with no offset."""
+    lines = [" ".join(line) for line in wrapped if line]
+    if not lines:
+        return []
+    size = st.get("font_size", 60)
+    width = min(980, max(170, max(_caption_text_width(line, size, font_path) for line in lines) + 56))
+    height = len(lines) * int(size * 1.18) + 24
+    cx, cy = anchor or (540, 1410)
+    x, y = max(30, int(cx - width / 2)), max(240, min(1640 - height, int(cy - height / 2)))
+    start, end = ass_time(group["start"]), ass_time(group["end"])
+    color = ass_bgr(st["plate"])
+    alpha = f"{round((1 - st.get('op', 0.6)) * 255):02X}"
+    shape = (f"Dialogue: 0,{start},{end},Base,,0,0,0,,"
+             f"{{\\an7\\pos({x},{y})\\p1\\bord0\\shad0\\1c{color}\\1a&H{alpha}&}}{_rounded_rect_path(width, height, min(30, height // 2))}{{\\p0}}")
+    text = "\\N".join(ass_text(line) for line in lines)
+    caption = f"Dialogue: 1,{start},{end},Base,,0,0,0,,{{\\an5\\pos({cx},{cy})}}{text}"
+    return [shape, caption]
+
+
+def _word_intervals(group, words):
+    """Use Whisper's exact word boundaries; edited text falls back to even phrase timing."""
+    start, end = float(group["start"]), max(float(group["end"]), float(group["start"]) + 0.04)
+    timed = group.get("wordTimes") or []
+    if len(timed) == len(words):
+        intervals = []
+        for item in timed:
+            a = max(start, float(item.get("start", start)))
+            b = min(end, max(a + 0.02, float(item.get("end", a + 0.02))))
+            intervals.append((a, b))
+        return intervals
+    span = max(0.04, end - start)
+    step = span / max(1, len(words))
+    return [(start + i * step, start + (i + 1) * step) for i in range(len(words))]
+
+
+def active_word_events(group, wrapped, st, anchor=None):
+    """Overlay one phrase-aligned word at a time in the selected accent color."""
+    if not st.get("accent"):
+        return []
+    words = [word for line in wrapped for word in line]
+    intervals = _word_intervals(group, words)
+    start, end = ass_time(group["start"]), ass_time(group["end"])
+    pos = f"{{\\an5\\pos({anchor[0]},{anchor[1]})}}" if anchor else ""
+    accent = ass_bgr(st["accent"])
+    events = []
+    for active, (word_start, word_end) in enumerate(intervals):
+        rich_lines, index = [], 0
+        for line_words in wrapped:
+            rendered = []
+            for word in line_words:
+                safe = ass_text(word)
+                if index == active:
+                    rendered.append(f"{{\\1a&H00&\\1c{accent}\\3a&HFF&\\4a&HFF&}}{safe}")
+                else:
+                    rendered.append(f"{{\\1a&HFF&\\3a&HFF&\\4a&HFF&}}{safe}")
+                index += 1
+            rich_lines.append(" ".join(rendered))
+        rich_text = "\\N".join(rich_lines)
+        events.append(f"Dialogue: 2,{ass_time(word_start)},{ass_time(word_end)},Base,,0,0,0,,{pos}{rich_text}")
+    return events
+
+
+CAPTION_ANCHORS = {
+    "bottom": (540, 1450),
+    "top": (540, 350),
+    "top_left": (300, 420),
+    "top_right": (780, 420),
+    "left": (270, 1020),
+    "right": (810, 1020),
+    "bottom_left": (300, 1480),
+    "bottom_right": (780, 1480),
+}
+
+
+def detect_caption_positions(path, groups, mode="auto"):
+    """Пробует найти лицо и ставит каждую фразу в более свободную безопасную зону.
+
+    Анализ локальный и необязательный; если OpenCV/каскад недоступен или лицо
+    не найдено, возвращается пустой список, и make_ass оставляет старую позицию.
+    """
+    if mode in ("top", "bottom"):
+        return [CAPTION_ANCHORS[mode]] * len(groups)
+    if mode != "auto" or not groups or len(groups) > 600:
+        return [None] * len(groups)
+    try:
+        import cv2
+        cascade_path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+        detector = cv2.CascadeClassifier(cascade_path)
+        if detector.empty():
+            return [None] * len(groups)
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            return [None] * len(groups)
+    except Exception:
+        return [None] * len(groups)
+
+    zones = ["bottom", "top", "left", "right", "bottom_left", "bottom_right", "top_left", "top_right"]
+    positions, previous_zone = [], None
+    for index, group in enumerate(groups):
+        t = max(0.0, (float(group["start"]) + float(group["end"])) / 2.0)
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+        ok, frame = cap.read()
+        if not ok:
+            positions.append(None)
+            continue
+        small = cv2.resize(frame, (270, 480), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        faces = detector.detectMultiScale(gray, scaleFactor=1.12, minNeighbors=5, minSize=(24, 24))
+        if len(faces) == 0:
+            positions.append(None)
+            continue
+
+        # Увеличиваем рамку лица, чтобы подпись не прилегала вплотную к голове.
+        occupied = []
+        for x, y, w, h in faces:
+            occupied.append((max(0, x * 4 - 100), max(0, y * 4 - 110),
+                              min(1080, (x + w) * 4 + 100), min(1920, (y + h) * 4 + 250)))
+        words = group.get("words") or group.get("text", "").split()
+        wrapped = wrap_caption_words(words)
+        lines = [" ".join(line) for line in wrapped if line]
+        width = min(900, max(190, max((_caption_text_width(line, 58) for line in lines), default=280) + 70))
+        height = max(100, len(lines) * 76 + 24)
+        # При равной безопасности порядок зон меняется от фразы к фразе, но лицо всегда важнее.
+        ordered = zones[index % len(zones):] + zones[:index % len(zones)]
+        scored = []
+        for zone in ordered:
+            cx, cy = CAPTION_ANCHORS[zone]
+            rect = (cx - width // 2, cy - height // 2, cx + width // 2, cy + height // 2)
+            overlap = 0.0
+            for ax1, ay1, ax2, ay2 in occupied:
+                ix = max(0, min(rect[2], ax2) - max(rect[0], ax1))
+                iy = max(0, min(rect[3], ay2) - max(rect[1], ay1))
+                overlap += (ix * iy) / max(1, width * height)
+            # Стараемся не ставить текст в самые верхние/нижние интерфейсные зоны.
+            edge_penalty = 0.35 if rect[1] < 240 or rect[3] > 1640 else 0.0
+            stability_penalty = 0.12 if zone != previous_zone else 0.0
+            scored.append((overlap * 100 + edge_penalty + stability_penalty, zone, (cx, cy)))
+        score, zone, anchor = min(scored, key=lambda item: item[0])
+        if score >= 100:
+            positions.append(None)
+        else:
+            positions.append(anchor)
+            previous_zone = zone
+    cap.release()
+    return positions
 
 
 def is_key(group, index):
     return index == 0 or (index % 3 == 0 and max(len(w) for w in group["words"]) >= 6)
 
 
-def plate_style_line(st):
+def plate_style_line(st, font_name="DejaVu Sans"):
     """Плашка с текстом: сверху по центру, цвета берём из выбранного стиля субтитров."""
     plate = st.get("key_plate") or st["plate"]
     text = st.get("key_text") or st["text"]
-    return (f"Style: Plate,DejaVu Sans,54,{ass_color(text)},{ass_color(text)},{ass_color(plate, 0.95)},"
+    return (f"Style: Plate,{font_name},54,{ass_color(text)},{ass_color(text)},{ass_color(plate, 0.95)},"
             f"{ass_color('000000', 0.5)},-1,0,0,0,100,100,0,0,3,20,0,8,90,90,250,1")
 
 
-def make_ass(groups, style_id, plates=None):
-    st = STYLES[style_id]
-    base_style = caption_text_style_line(st) if st.get("custom") else style_line("Base", st["text"], st["plate"], st["op"], bold=st.get("bold", True))
-    styles = [base_style, plate_style_line(st)]
+def make_ass(groups, style_id, plates=None, positions=None, plate_opacity=None, font_id=None):
+    st = dict(STYLES[style_id])
+    if plate_opacity is not None and st.get("custom") not in ("clean", "accent"):
+        st["op"] = max(0.2, min(0.8, float(plate_opacity) / 100.0))
+    font = caption_font_config(font_id)
+    font_name, font_path = font["name"], font["path"]
+    base_style = caption_text_style_line(st, font_name) if st.get("custom") else style_line("Base", st["text"], st["plate"], st["op"], bold=st.get("bold", True), font_name=font_name, secondary=st.get("accent"))
+    styles = [base_style, plate_style_line(st, font_name)]
     if st["key"] == "plate":
-        styles.append(style_line("Key", st["key_text"], st["key_plate"], 0.95, bold=st.get("bold", True)))
+        styles.append(style_line("Key", st["key_text"], st["key_plate"], 0.95, bold=st.get("bold", True), font_name=font_name))
     header = ("[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n"
               "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, "
               "Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
@@ -564,16 +761,31 @@ def make_ass(groups, style_id, plates=None):
         wrapped = wrap_caption_words(words, max_chars=24 if st.get("custom") else CAPTION_MAX_LINE_CHARS)
         display_text = "\n".join(" ".join(line) for line in wrapped)
         s, e, text = ass_time(g["start"]), ass_time(g["end"]), ass_text(display_text)
+        anchor = positions[i] if positions and i < len(positions) else None
+        pos = f"{{\\an5\\pos({anchor[0]},{anchor[1]})}}" if anchor else ""
         if st.get("custom") == "shifted":
-            lines.extend(shifted_caption_events(g, wrapped, st))
+            lines.extend(shifted_caption_events(g, wrapped, st, anchor, font_path))
+            lines.extend(active_word_events(g, wrapped, st, anchor))
+            continue
+        if st.get("custom") == "glass":
+            lines.extend(glass_caption_events(g, wrapped, st, anchor, font_path))
+            lines.extend(active_word_events(g, wrapped, st, anchor))
+            continue
+        if st.get("custom") == "accent":
+            lines.append(f"Dialogue: 1,{s},{e},Base,,0,0,0,,{pos}{text}")
+            lines.extend(active_word_events(g, wrapped, st, anchor))
             continue
         if st.get("echo"):
-            lines.append(f"Dialogue: 0,{s},{e},Base,,0,0,0,,{{\\pos(540,1466)\\alpha&H99&}}{text}")
-            lines.append(f"Dialogue: 1,{s},{e},Base,,0,0,0,,{{\\pos(540,1490)}}{text}")
+            if anchor:
+                lines.append(f"Dialogue: 0,{s},{e},Base,,0,0,0,,{{\\an5\\pos({anchor[0]},{anchor[1] - 24})\\alpha&H99&}}{text}")
+                lines.append(f"Dialogue: 1,{s},{e},Base,,0,0,0,,{pos}{text}")
+            else:
+                lines.append(f"Dialogue: 0,{s},{e},Base,,0,0,0,,{{\\pos(540,1466)\\alpha&H99&}}{text}")
+                lines.append(f"Dialogue: 1,{s},{e},Base,,0,0,0,,{{\\pos(540,1490)}}{text}")
             continue
         if st["key"] == "word":
             accent = st["accents"][i % len(st["accents"])]
-            lines.append(f"Dialogue: 0,{s},{e},Base,,0,0,0,,{{\\1a&HFF&}}{text}")
+            lines.append(f"Dialogue: 0,{s},{e},Base,,0,0,0,,{pos}{{\\1a&HFF&}}{text}")
             rich_lines, word_index = [], 0
             for line_words in wrapped:
                 rendered = []
@@ -586,10 +798,10 @@ def make_ass(groups, style_id, plates=None):
                     word_index += 1
                 rich_lines.append(" ".join(rendered))
             rich_text = "\\N".join(rich_lines)
-            lines.append(f"Dialogue: 1,{s},{e},Base,,0,0,0,,{rich_text}")
+            lines.append(f"Dialogue: 1,{s},{e},Base,,0,0,0,,{pos}{rich_text}")
             continue
         name = "Key" if st["key"] == "plate" and is_key(g, i) else "Base"
-        lines.append(f"Dialogue: 0,{s},{e},{name},,0,0,0,,{text}")
+        lines.append(f"Dialogue: 0,{s},{e},{name},,0,0,0,,{pos}{text}")
     return header + "\n".join(lines) + "\n"
 
 
@@ -707,10 +919,13 @@ def default_zoom_events(groups, duration):
     return events
 
 
-def zoom_expression(groups, profile, video_duration):
+def zoom_expression(groups, profile, video_duration, camera_mode="standard"):
     """Выражение масштаба для ffmpeg.
     С референсом: те же наезды (сила, скорость, удержание), прижатые к ближайшему слову.
     Без референса: зумы по всему ролику (см. default_zoom_events)."""
+    if camera_mode == "none":
+        return "1"
+    strength = 1.45 if camera_mode == "boosted" else 1.0
     if profile and profile["events"] and video_duration > 0:
         events, offset = [], 0.0
         while offset < video_duration and len(events) < 120:
@@ -724,6 +939,7 @@ def zoom_expression(groups, profile, video_duration):
             offset += profile["duration"]
     else:
         events = default_zoom_events(groups, video_duration)
+    events = [{**event, "amp": float(event.get("amp", 0)) * strength} for event in events]
     terms = []
     for ev in events[:120]:
         ramp = max(0.06, ev["ramp"])
@@ -731,6 +947,23 @@ def zoom_expression(groups, profile, video_duration):
         end = ev["t"] + ramp + ev["hold"]
         terms.append(f"{ev['amp']:.3f}*clip((t-{ev['t']:.2f})/{ramp:.2f},0,1)*(1-clip((t-{end:.2f})/{out:.2f},0,1))")
     return f"1+min(0.3,{'+'.join(terms)})" if terms else "1"
+
+
+COLOR_FILTERS = {
+    "original": "eq=saturation=1.08:contrast=1.04:brightness=0.02",
+    "clean": "eq=saturation=1.0:contrast=1.0:brightness=0",
+    "peach": "eq=saturation=1.10:contrast=1.02:brightness=0.025,colorbalance=rs=0.025:bs=-0.015",
+    "soft": "eq=saturation=0.94:contrast=0.96:brightness=0.025",
+    "cool": "eq=saturation=0.98:contrast=1.02:brightness=0.005,colorbalance=rs=-0.02:bs=0.035",
+    "film": "eq=saturation=0.78:contrast=1.08:brightness=-0.005",
+    "contrast": "eq=saturation=1.03:contrast=1.14:brightness=-0.015",
+    "bright": "eq=saturation=1.03:contrast=1.02:brightness=0.035",
+    "warm": "eq=saturation=1.10:contrast=1.02:brightness=0.015,colorbalance=rs=0.04:bs=-0.035",
+}
+
+
+def color_filter_expression(filter_id):
+    return COLOR_FILTERS.get(str(filter_id or "original"), COLOR_FILTERS["original"])
 
 
 # ---------- Вставки (гифки и видео поверх ролика) ----------
@@ -790,7 +1023,7 @@ def insert_inputs(planned):
     return args
 
 
-def build_filter_graph(planned, base_chain, ass):
+def build_filter_graph(planned, base_chain, ass, fonts_dir=None):
     """Граф ffmpeg: основное видео (зум, цвет) → вставки по очереди → субтитры и плашки сверху."""
     parts = [f"[0:v]{base_chain}[b0]"]
     for n, item in enumerate(planned, start=1):
@@ -806,14 +1039,17 @@ def build_filter_graph(planned, base_chain, ass):
             f"fade=t=in:st=0:d={FADE}:alpha=1,fade=t=out:st={max(0.0, dur - FADE):.2f}:d={FADE}:alpha=1,"
             f"setpts=PTS-STARTPTS+{at:.2f}/TB[i{n}]")
         parts.append(f"[b{n - 1}][i{n}]overlay={pos}:enable='between(t,{at:.2f},{at + dur:.2f})':eof_action=pass[b{n}]")
-    parts.append(f"[b{len(planned)}]subtitles=filename='{ass}'[vout]")
+    font_option = f":fontsdir='{fonts_dir}'" if fonts_dir else ""
+    parts.append(f"[b{len(planned)}]subtitles=filename='{ass}'{font_option}[vout]")
     return ";\n".join(parts)
 
 
 # ---------- Финальная сборка ----------
-def render(path, segments, workdir, style_id, profile, inserts=None, plates=None):
-    groups = group_words(segments)
+def render(path, segments, workdir, style_id, profile, inserts=None, plates=None, caption_position="auto", caption_edits=None,
+           camera_mode="standard", color_filter="original", plate_opacity=None, font_id=None):
+    groups = apply_caption_edits(group_words(segments), caption_edits or [])
     total = probe_duration(path)
+    positions = detect_caption_positions(path, groups, caption_position)
     ass = os.path.join(workdir, "captions.ass")
     clean_plates = []
     for pl in plates or []:
@@ -824,19 +1060,20 @@ def render(path, segments, workdir, style_id, profile, inserts=None, plates=None
         if pl.get("text") and at < total:
             clean_plates.append({"text": pl["text"], "at": at, "dur": max(0.8, min(dur, total - at))})
     with open(ass, "w", encoding="utf-8") as f:
-        f.write(make_ass(groups, style_id, clean_plates))
-    zoom = zoom_expression(groups, profile, total)
+        f.write(make_ass(groups, style_id, clean_plates, positions, plate_opacity, font_id))
+    zoom = zoom_expression(groups, profile, total, camera_mode)
     base_chain = ",".join([
         "scale=1080:1920:force_original_aspect_ratio=increase",
         "crop=1080:1920",
         f"scale=w='trunc(1080*({zoom})/2)*2':h='trunc(1920*({zoom})/2)*2':eval=frame",
         "crop=1080:1920",
-        "eq=saturation=1.08:contrast=1.04:brightness=0.02",
+        color_filter_expression(color_filter),
     ])
     planned = plan_inserts(inserts or [], groups, total)
     graph = os.path.join(workdir, "graph.txt")
+    fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
     with open(graph, "w", encoding="utf-8") as f:
-        f.write(build_filter_graph(planned, base_chain, ass))
+        f.write(build_filter_graph(planned, base_chain, ass, fonts_dir))
     out = os.path.join(workdir, "reelbot-result.mp4")
     run(["ffmpeg", "-y", "-i", path] + insert_inputs(planned) +
         ["-filter_complex_script", graph, "-map", "[vout]", "-map", "0:a", "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
@@ -894,12 +1131,19 @@ def hook_heuristic(text, first_start):
 
 def hook_with_ai(full_text, first_text):
     prompt = (
-        "Ты редактор коротких вертикальных видео (Reels, Shorts). Оцени хук — первые 3–4 секунды ролика.\n\n"
+        "Ты бережный редактор коротких вертикальных видео. Разбери только текст расшифровки: ты не видишь кадры, "
+        "не знаешь реальных результатов и не проверял Instagram. Не считай вопрос обязательным признаком сильного хука. "
+        "Хорошее начало может быть действием, личной историей, желанием, мифом с подтверждением или интригой. "
+        "Оцени, понятна ли задача ролика, раскрывается ли обещание начала, логично ли речь ведёт к решению, "
+        "есть ли настоящий показ/пруф и понятный призыв. Не выдумывай личный опыт, цифры, факты и доказательства.\n\n"
         f"Хук (первые секунды речи): «{first_text}»\n\nВся речь ролика:\n{full_text[:3000]}\n\n"
         "Ответь ТОЛЬКО JSON без пояснений: {\"score\": число 1-10, \"verdict\": \"сильный\" или \"слабый\", "
-        "\"why\": \"1–2 коротких предложения почему\", \"variants\": [\"вариант 1\", \"вариант 2\", \"вариант 3\"]}. "
-        "Варианты хука пиши от первого лица, в голосе автора, до 12 слов, по теме ролика, конкретно: интрига, вопрос, "
-        "цифра или смелое утверждение. Варианты нужны всегда, даже если хук сильный (как альтернатива). По-русски."
+        "\"why\": \"1–2 коротких предложения\", \"structure\": \"понятно ли развитие мысли\", "
+        "\"proof\": \"какого доказательства не хватает или что уже подтверждает слова\", "
+        "\"flow\": \"где переход резкий или затянутый\", \"cta\": \"понятен ли призыв\", "
+        "\"variants\": [\"вариант 1\", \"вариант 2\", \"вариант 3\"]}. "
+        "Дай практичные замечания по схеме: задача → начало → проблема/желание → причина выбора → решение → демонстрация → доказательство → призыв. "
+        "Не делай вид, что оценил картинку. Варианты начала — до 12 слов, оригинальные, без неподтверждённых обещаний. По-русски."
     )
     r = requests.post("https://api.anthropic.com/v1/messages", timeout=90,
                       headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
@@ -908,6 +1152,61 @@ def hook_with_ai(full_text, first_text):
     text = "".join(b.get("text", "") for b in r.json().get("content", []))
     m = re.search(r"\{.*\}", text, re.S)
     return json.loads(m.group(0))
+
+
+def script_with_ai(topic):
+    if not ANTHROPIC_KEY:
+        return ("Для создания персонального сценария нужен настроенный ИИ-редактор; сейчас он не подключён к этому запуску.\n\n"
+                "Пока держи каркас: начало, которое обещает конкретную пользу → проблема или желание зрителя → "
+                "почему ты выбрала решение → показ применения → реальное доказательство/результат → короткий призыв. "
+                "Не добавляй цифры и личные истории, если их нельзя подтвердить. Бот не ищет в Instagram без отдельного источника.")
+    prompt = (
+        "Ты русскоязычный редактор коротких видео и сценарист коммерческих, UGC и обычных авторских роликов. "
+        "Сначала определи одну задачу: продать, снять сомнение, показать эффект, объяснить, развлечь или рассказать историю. "
+        "Для коммерческого видео выбери главную цель: продажа, ответ на возражение или демонстрация результата. "
+        "Предложи разные типы начала: действие плюс любопытство; честная личная история; миф/спорное мнение с доказательством; "
+        "конкретное желаемое изменение; сравнение или мини-проверка. Сильное начало не обязано быть вопросом. "
+        "Веди зрителя связно: проблема/желание → причина выбора → решение → демонстрация → проверяемое доказательство → призыв. "
+        "Можно показать «до/после» или повторить результат перед камерой. Не добавляй личную историю, свойства продукта или результат, "
+        "о которых автор не сообщал. Текст должен звучать естественно, не как список рекламных преимуществ.\n\n"
+        f"ТЕМА ПОЛЬЗОВАТЕЛЯ: {topic[:1200]}\n\n"
+        "Сделай три разных начала, каждое до 12 слов и примерно на первые 1–3 секунды, с разными приёмами; объясни каждое одной фразой. "
+        "К каждому началу предложи первое действие/изображение в кадре. Затем создай сценарий на 20–35 секунд и план кадров по шагам, "
+        "который раскрывает обещание начала и не перескакивает к характеристикам до объяснения решения. "
+        "Не копируй известные ролики и не заявляй, что искал Instagram. Не придумывай опыт автора, отзывы, числа, "
+        "эффективность или свойства продукта. Если нужно личное/фактическое доказательство, обозначь его как [добавить только свой реальный пример]. "
+        "Если тема слишком общая, явно напиши допущение, не задавай длинную анкету. Пиши простым русским языком.\n\n"
+        "Ответь только JSON: {\"goal\":\"одна задача ролика\",\"hooks\":[{\"text\":\"...\",\"angle\":\"...\",\"why\":\"...\",\"first_frame\":\"действие или первый кадр\"}],"
+        "\"scenario\":[{\"time\":\"0-3 сек\",\"say\":\"текст\",\"show\":\"что снять\"}],"
+        "\"proof\":\"какое подтверждение нужно\",\"cta\":\"призыв\",\"assumptions\":\"допущения или пусто\"}"
+    )
+    r = requests.post("https://api.anthropic.com/v1/messages", timeout=90,
+                      headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                      json={"model": HOOK_MODEL, "max_tokens": 1400, "messages": [{"role": "user", "content": prompt}]})
+    r.raise_for_status()
+    text = "".join(b.get("text", "") for b in r.json().get("content", []))
+    match = re.search(r"\{.*\}", text, re.S)
+    if not match:
+        raise ValueError("ИИ не вернул сценарий в ожидаемом формате")
+    data = json.loads(match.group(0))
+    hooks = data.get("hooks") if isinstance(data.get("hooks"), list) else []
+    steps = data.get("scenario") if isinstance(data.get("scenario"), list) else []
+    lines = [f"Задача ролика: {str(data.get('goal', 'показать пользу'))[:220]}", "", "Три варианта начала:"]
+    for i, hook in enumerate(hooks[:3], 1):
+        if isinstance(hook, dict):
+            lines.append(f"{i}) {str(hook.get('text', ''))[:180]} — {str(hook.get('angle', ''))[:100]}. {str(hook.get('why', ''))[:150]}\nПервый кадр: {str(hook.get('first_frame', ''))[:150]}")
+    lines.extend(["", "Сценарий и что показать:"])
+    for step in steps[:7]:
+        if isinstance(step, dict):
+            lines.append(f"{str(step.get('time', ''))[:35]}: {str(step.get('say', ''))[:240]}\nКадр: {str(step.get('show', ''))[:180]}")
+    if data.get("proof"):
+        lines.extend(["", f"Доказательство: {str(data['proof'])[:350]}"])
+    if data.get("cta"):
+        lines.append(f"Призыв: {str(data['cta'])[:250]}")
+    if data.get("assumptions"):
+        lines.extend(["", f"Допущение: {str(data['assumptions'])[:250]}"])
+    lines.extend(["", "Важно: это оригинальная заготовка по теме, не копия чужого ролика и не проверка Instagram. Факты и личный опыт нужно подтвердить."])
+    return "\n".join(lines)[:3800]
 
 
 def hook_message(segments):
@@ -920,9 +1219,12 @@ def hook_message(segments):
         try:
             d = hook_with_ai(full, first)
             variants = "\n".join(f"{i + 1}) {v}" for i, v in enumerate(d.get("variants", [])[:3]))
-            return (f"Хук: «{first}»\nОценка: {d.get('score', '?')}/10, {d.get('verdict', '')}.\n{d.get('why', '')}\n\n"
-                    f"Варианты хука:\n{variants}\n\n"
-                    "Важно: это разбор текста вашего ролика, бот не открывал Instagram и не сравнивал его с чужими видео.")
+            return (f"Начало ролика: «{first}»\nПредварительная оценка текста: {d.get('score', '?')}/10 ({d.get('verdict', '')}); это не оценка картинки или успеха ролика.\n"
+                    f"Почему: {d.get('why', '')}\nСтруктура: {d.get('structure', 'не удалось оценить')}\n"
+                    f"Доказательство: {d.get('proof', 'не удалось оценить')}\nПереходы: {d.get('flow', 'не удалось оценить')}\n"
+                    f"Призыв: {d.get('cta', 'не удалось оценить')}\n\n"
+                    f"Другие варианты начала:\n{variants}\n\n"
+                    "Оценивался только текст расшифровки: картинку бот не оценивал и чужие ролики в Instagram не искал.")
         except Exception as exc:
             print("разбор хука через ИИ не получился:", exc)
     _, notes = hook_heuristic(first, first_start)
@@ -931,19 +1233,81 @@ def hook_message(segments):
             "Это не экспертная оценка и бот не искал похожие ролики в Instagram.")
 
 
+def apply_speed(path, speed, workdir):
+    """Change video tempo before transcription so caption times stay aligned; atempo preserves pitch."""
+    try:
+        speed = float(speed)
+    except (TypeError, ValueError):
+        raise UserError("Не удалось прочитать скорость ролика. Выбери её командой /speed.")
+    allowed = (1.0, 1.1, 1.2, 1.3, 1.5)
+    if not any(abs(speed - value) < 0.001 for value in allowed):
+        raise UserError("Такой скорости нет. Выбери значение командой /speed.")
+    if abs(speed - 1.0) < 0.001:
+        return path
+    output = os.path.join(workdir, "reelbot-speed.mp4")
+    run(["ffmpeg", "-y", "-i", path, "-vf", f"setpts=PTS/{speed:.3f},fps=30", "-af", f"atempo={speed:.3f}",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", output])
+    return output
+
+
+def send_media_credits(chat, inserts):
+    lines = []
+    for item in inserts or []:
+        if item.get("sourceName") != "Wikimedia Commons":
+            continue
+        title = str(item.get("name") or "Материал").strip()[:100]
+        artist = str(item.get("artist") or "Автор не указан").strip()[:180]
+        license_name = str(item.get("license") or "лицензия не указана").strip()[:80]
+        source = str(item.get("sourceUrl") or item.get("url") or "").strip()[:500]
+        license_url = str(item.get("licenseUrl") or "").strip()[:300]
+        lines.append(f"• {title} — {artist}; {license_name}. Лицензия: {license_url}. Источник: {source}")
+    if not lines:
+        return
+    prefix = "Источники и авторство использованных вставок (можно скопировать в описание ролика):\n\n"
+    chunks, current = [], prefix
+    for line in lines:
+        if len(current) + len(line) + 2 > 3300 and current != prefix:
+            chunks.append(current.rstrip())
+            current = "Продолжение — источники и авторство:\n\n"
+        current += line + "\n\n"
+    if current.strip():
+        chunks.append(current.rstrip())
+    for chunk in chunks:
+        try:
+            say(chat, chunk)
+        except Exception as exc:
+            print("не удалось отправить список авторства:", exc)
+
+
 # ---------- Одна задача ----------
 def process(job):
     chat = job["chatId"]
+    if job.get("kind") == "creative":
+        say(chat, "Готовлю варианты начала и короткий сценарий по твоей теме.")
+        try:
+            message = script_with_ai(str(job.get("request", "")))
+        except Exception as exc:
+            print("не удалось подготовить сценарий:", exc)
+            message = ("Не получилось подготовить сценарий через ИИ. Попробуй ещё раз чуть позже.\n\n"
+                       "Пока пользуйся схемой: конкретное начало → проблема или желаемый результат → решение → "
+                       "показ на камеру → настоящее доказательство → короткий призыв. Неподтверждённые обещания лучше не добавлять.")
+        say(chat, message)
+        gw("/runner/complete", json={"jobId": job["id"]})
+        return
+
     style = job.get("style") if job.get("style") in STYLES else "shifted"
     workdir = tempfile.mkdtemp(prefix="reelbot-")
     try:
         sources = job.get("sources") or []
         say(chat, f"Начинаю монтаж {job['id']}. Стиль: {STYLES[style]['label']}. Исходников: {len(sources)}. "
-                  f"Вставок: {len(job.get('inserts') or [])}, плашек: {len(job.get('plates') or [])}. Скачиваю, убираю паузы, расшифровываю речь.")
+                  f"Вставок: {len(job.get('inserts') or [])}, плашек: {len(job.get('plates') or [])}. "
+                  f"Скорость ×{job.get('speed', 1)}; камера: {job.get('cameraMode', 'standard')}; фильтр: {job.get('colorFilter', 'original')}. "
+                  "Скачиваю, убираю паузы, расшифровываю речь.")
         paths = [download(s, workdir) for s in sources]
         joined = join_sources(paths, workdir)
         cleaned = remove_pauses(joined, workdir)
-        segments = transcribe(cleaned, workdir)
+        working = apply_speed(cleaned, job.get("speed", 1), workdir)
+        segments = transcribe(working, workdir)
         if not any(s["text"] for s in segments):
             raise UserError("Не расслышала речь в видео. Проверь, что звук есть и голос слышно.")
         profile = None
@@ -962,13 +1326,17 @@ def process(job):
             except Exception as exc:  # одна плохая вставка не должна ронять весь монтаж
                 print("вставка не скачалась:", exc)
                 say(chat, "Одну вставку скачать не удалось, монтирую без неё. Проверь, что ссылка прямая и открыта всем.")
-        result = render(cleaned, segments, workdir, style, profile, inserts, job.get("plates") or [])
+        result = render(working, segments, workdir, style, profile, inserts, job.get("plates") or [],
+                        job.get("captionPosition", "auto"), job.get("captionEdits") or [],
+                        job.get("cameraMode", "standard"), job.get("colorFilter", "original"),
+                        job.get("plateOpacity"), job.get("captionFont"))
         with open(result, "rb") as f:
             r = requests.post(GATEWAY + "/runner/video", headers={"authorization": f"Bearer {TOKEN}"}, timeout=900,
                               data={"chat_id": str(chat), "caption": f"{job['id']} готов. Стиль: {STYLES[style]['label']}."},
                               files={"video": ("reelbot-result.mp4", f, "video/mp4")})
         if not r.ok:
             raise RuntimeError(f"отправка видео: {r.status_code} {r.text[:200]}")
+        send_media_credits(chat, inserts)
         gw("/runner/complete", json={"jobId": job["id"]})
         msg = hook_message(segments)
         if msg:
