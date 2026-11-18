@@ -37,6 +37,7 @@ CAPTION_FONTS = {
     "oswald": {"name": "Oswald", "path": os.path.join(FONT_DIR, "Oswald[wght].ttf"), "axes": [700]},
 }
 DEFAULT_CAPTION_FONT = "montserrat"
+CAPTION_ACCENTS = {"yellow": "FFD84D", "pink": "FF4FA3", "red": "F04452"}
 
 STYLES = {
     "glass": dict(label="Glass", plate="000000", op=0.6, text="FFFFFF", key="none", bold=False),
@@ -51,6 +52,8 @@ STYLES = {
     "karaoke_pink": dict(label="Белая фраза + розовое активное слово", plate="000000", op=0.0, text="FFFFFF", key="none", custom="accent", accent="FF4FA3", font_size=64),
     "karaoke_red": dict(label="Белая фраза + красное активное слово", plate="000000", op=0.0, text="FFFFFF", key="none", custom="accent", accent="F04452", font_size=64),
     "glass_bar": dict(label="Тёмная прозрачная плашка", plate="24212B", op=0.6, text="FFFFFF", key="none", custom="glass", font_size=60),
+    "cream_bar": dict(label="Светлая кремовая плашка", plate="F4E9D8", op=0.6, text="302923", key="none", custom="cream", font_size=60, outline_color="302923", outline_width=0.35, shadow=0.25),
+    "outlined": dict(label="Белый текст с розовой обводкой", plate="000000", op=0.0, text="FFFFFF", key="none", custom="outline", font_size=64, outline_color="FF4FA3", outline_width=4, shadow=0.7),
 }
 
 
@@ -517,8 +520,11 @@ def caption_text_style_line(st, font_name="DejaVu Sans"):
     size = st.get("font_size", 60)
     alignment = 5 if st.get("custom") == "shifted" else 2
     margin_v = 0 if alignment == 5 else 430
+    outline_color = st.get("outline_color", "000000")
+    outline_width = st.get("outline_width", 1.5)
+    shadow = st.get("shadow", 0.8)
     return (f"Style: Base,{font_name},{size},{ass_color(st['text'])},{ass_color(st.get('accent') or st['text'])},"
-            f"{ass_color('000000')},{ass_color('000000', 0)},-1,0,0,0,100,100,0,0,1,1.5,0.8,"
+            f"{ass_color(outline_color)},{ass_color('000000', 0)},-1,0,0,0,100,100,0,0,1,{outline_width},{shadow},"
             f"{alignment},70,70,{margin_v},1")
 
 
@@ -591,6 +597,27 @@ def glass_caption_events(group, wrapped, st, anchor=None, font_path=None):
     alpha = f"{round((1 - st.get('op', 0.6)) * 255):02X}"
     shape = (f"Dialogue: 0,{start},{end},Base,,0,0,0,,"
              f"{{\\an7\\pos({x},{y})\\p1\\bord0\\shad0\\1c{color}\\1a&H{alpha}&}}{_rounded_rect_path(width, height, min(30, height // 2))}{{\\p0}}")
+    text = "\\N".join(ass_text(line) for line in lines)
+    caption = f"Dialogue: 1,{start},{end},Base,,0,0,0,,{{\\an5\\pos({cx},{cy})}}{text}"
+    return [shape, caption]
+
+
+def cream_caption_events(group, wrapped, st, anchor=None, font_path=None):
+    """Draw a warm cream rounded card with dark text, matching the light Dropbox reference."""
+    lines = [" ".join(line) for line in wrapped if line]
+    if not lines:
+        return []
+    size = st.get("font_size", 60)
+    width = min(980, max(170, max(_caption_text_width(line, size, font_path) for line in lines) + 60))
+    height = len(lines) * int(size * 1.18) + 26
+    cx, cy = anchor or (540, 1410)
+    x, y = max(30, int(cx - width / 2)), max(240, min(1640 - height, int(cy - height / 2)))
+    start, end = ass_time(group["start"]), ass_time(group["end"])
+    color = ass_bgr(st["plate"])
+    alpha = f"{round((1 - st.get('op', 0.6)) * 255):02X}"
+    shape = (f"Dialogue: 0,{start},{end},Base,,0,0,0,,"
+             f"{{\\an7\\pos({x},{y})\\p1\\bord0\\shad0\\1c{color}\\1a&H{alpha}&}}"
+             f"{_rounded_rect_path(width, height, min(30, height // 2))}{{\\p0}}")
     text = "\\N".join(ass_text(line) for line in lines)
     caption = f"Dialogue: 1,{start},{end},Base,,0,0,0,,{{\\an5\\pos({cx},{cy})}}{text}"
     return [shape, caption]
@@ -736,10 +763,12 @@ def plate_style_line(st, font_name="DejaVu Sans"):
             f"{ass_color('000000', 0.5)},-1,0,0,0,100,100,0,0,3,20,0,8,90,90,250,1")
 
 
-def make_ass(groups, style_id, plates=None, positions=None, plate_opacity=None, font_id=None):
+def make_ass(groups, style_id, plates=None, positions=None, plate_opacity=None, font_id=None, caption_accent=None):
     st = dict(STYLES[style_id])
-    if plate_opacity is not None and st.get("custom") not in ("clean", "accent"):
+    if plate_opacity is not None and st.get("custom") not in ("clean", "accent", "outline"):
         st["op"] = max(0.2, min(0.8, float(plate_opacity) / 100.0))
+    if st.get("custom") == "accent" and caption_accent in CAPTION_ACCENTS:
+        st["accent"] = CAPTION_ACCENTS[caption_accent]
     font = caption_font_config(font_id)
     font_name, font_path = font["name"], font["path"]
     base_style = caption_text_style_line(st, font_name) if st.get("custom") else style_line("Base", st["text"], st["plate"], st["op"], bold=st.get("bold", True), font_name=font_name, secondary=st.get("accent"))
@@ -770,6 +799,9 @@ def make_ass(groups, style_id, plates=None, positions=None, plate_opacity=None, 
         if st.get("custom") == "glass":
             lines.extend(glass_caption_events(g, wrapped, st, anchor, font_path))
             lines.extend(active_word_events(g, wrapped, st, anchor))
+            continue
+        if st.get("custom") == "cream":
+            lines.extend(cream_caption_events(g, wrapped, st, anchor, font_path))
             continue
         if st.get("custom") == "accent":
             lines.append(f"Dialogue: 1,{s},{e},Base,,0,0,0,,{pos}{text}")
@@ -1046,7 +1078,7 @@ def build_filter_graph(planned, base_chain, ass, fonts_dir=None):
 
 # ---------- Финальная сборка ----------
 def render(path, segments, workdir, style_id, profile, inserts=None, plates=None, caption_position="auto", caption_edits=None,
-           camera_mode="standard", color_filter="original", plate_opacity=None, font_id=None):
+           camera_mode="standard", color_filter="original", plate_opacity=None, font_id=None, caption_accent=None):
     groups = apply_caption_edits(group_words(segments), caption_edits or [])
     total = probe_duration(path)
     positions = detect_caption_positions(path, groups, caption_position)
@@ -1060,7 +1092,7 @@ def render(path, segments, workdir, style_id, profile, inserts=None, plates=None
         if pl.get("text") and at < total:
             clean_plates.append({"text": pl["text"], "at": at, "dur": max(0.8, min(dur, total - at))})
     with open(ass, "w", encoding="utf-8") as f:
-        f.write(make_ass(groups, style_id, clean_plates, positions, plate_opacity, font_id))
+        f.write(make_ass(groups, style_id, clean_plates, positions, plate_opacity, font_id, caption_accent))
     zoom = zoom_expression(groups, profile, total, camera_mode)
     base_chain = ",".join([
         "scale=1080:1920:force_original_aspect_ratio=increase",
@@ -1329,7 +1361,7 @@ def process(job):
         result = render(working, segments, workdir, style, profile, inserts, job.get("plates") or [],
                         job.get("captionPosition", "auto"), job.get("captionEdits") or [],
                         job.get("cameraMode", "standard"), job.get("colorFilter", "original"),
-                        job.get("plateOpacity"), job.get("captionFont"))
+                        job.get("plateOpacity"), job.get("captionFont"), job.get("captionAccent"))
         with open(result, "rb") as f:
             r = requests.post(GATEWAY + "/runner/video", headers={"authorization": f"Bearer {TOKEN}"}, timeout=900,
                               data={"chat_id": str(chat), "caption": f"{job['id']} готов. Стиль: {STYLES[style]['label']}."},

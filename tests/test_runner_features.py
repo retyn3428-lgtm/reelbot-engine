@@ -46,9 +46,9 @@ class CaptionPositionTests(unittest.TestCase):
                  "wordTimes": [{"word": "Мой", "start": 0.0, "end": 0.25},
                                {"word": "хук", "start": 0.30, "end": 0.55},
                                {"word": "работает", "start": 0.60, "end": 1.2}]}
-        ass = runner.make_ass([group], "karaoke_yellow")
+        ass = runner.make_ass([group], "karaoke_yellow", caption_accent="pink")
         self.assertIn("Dialogue: 2,0:00:00.30,0:00:00.55,Base", ass)
-        self.assertIn("\\1c&H4DD8FF&", ass)  # Yellow accent, converted to ASS BGR.
+        self.assertIn("\\1c&HA34FFF&", ass)  # Pink accent, converted to ASS BGR.
         self.assertIn("Style: Base,Montserrat,", ass)
 
     def test_glass_bar_uses_one_rounded_translucent_shape(self):
@@ -56,6 +56,19 @@ class CaptionPositionTests(unittest.TestCase):
         self.assertIn("Style: Base,Inter,", ass)
         self.assertIn("\\1a&H80&", ass)
         self.assertIn("\\p1\\bord0\\shad0", ass)
+
+    def test_cream_bar_is_light_rounded_and_respects_opacity(self):
+        ass = runner.make_ass(self.groups, "cream_bar", plate_opacity=60)
+        self.assertIn("\\1c&HD8E9F4&", ass)
+        self.assertIn("\\1a&H66&", ass)  # 60% fill means 40% ASS transparency.
+        self.assertIn("Dialogue: 0,", ass)
+        self.assertIn("Dialogue: 1,", ass)
+
+    def test_outline_style_has_a_pink_edge_without_a_plate_shape(self):
+        ass = runner.make_ass(self.groups, "outlined")
+        self.assertIn("Style: Base,Montserrat,64,", ass)
+        self.assertIn("&H00A34FFF", ass)
+        self.assertNotIn("\\p1\\bord0\\shad0", ass)
 
 
 class CaptionEditTests(unittest.TestCase):

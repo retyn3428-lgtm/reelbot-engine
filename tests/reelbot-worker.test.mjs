@@ -181,22 +181,42 @@ test("camera, speed and filter selections are stored in a new edit job", async (
   }
 });
 
-test("caption style, font and plate opacity reach the queued render job", async () => {
+test("six distinct caption styles and karaoke color reach the queued render job", async () => {
   const env = makeEnv();
+  const sent = [];
   const oldFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }));
+  globalThis.fetch = async (_url, init) => {
+    sent.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }));
+  };
   try {
-    await sendUpdate(env, { callback_query: { id: "st1", from: { id: 42 }, message: { chat: { id: 42 } }, data: "style:karaoke_pink" } });
+    await sendUpdate(env, { message: { from: { id: 42 }, chat: { id: 42 }, text: "/styles" } });
+    assert.equal(sent[0].media.length, 6);
+    assert.deepEqual(sent[0].media.map((item) => item.media.split("/").pop()), [
+      "shifted.jpg", "clean.jpg", "glass_bar.jpg", "cream_bar.jpg", "outlined.jpg", "karaoke_yellow.jpg",
+    ]);
+    const styleMenu = sent.find((message) => message.reply_markup?.inline_keyboard);
+    const styleButtons = styleMenu.reply_markup.inline_keyboard.flat();
+    assert.equal(styleButtons.length, 6);
+    assert.deepEqual(styleButtons.map((button) => button.callback_data), [
+      "style:shifted", "style:clean", "style:glass_bar", "style:cream_bar", "style:outlined", "style:karaoke_yellow",
+    ]);
+    await sendUpdate(env, { callback_query: { id: "st1", from: { id: 42 }, message: { chat: { id: 42 } }, data: "style:cream_bar" } });
     await sendUpdate(env, { callback_query: { id: "op1", from: { id: 42 }, message: { chat: { id: 42 } }, data: "plate-opacity:40" } });
     await sendUpdate(env, { callback_query: { id: "fo1", from: { id: 42 }, message: { chat: { id: 42 } }, data: "caption-font:oswald" } });
+    await sendUpdate(env, { callback_query: { id: "ac1", from: { id: 42 }, message: { chat: { id: 42 } }, data: "caption-accent:pink" } });
+    await sendUpdate(env, { message: { from: { id: 42 }, chat: { id: 42 }, text: "/new" } });
     const session = JSON.parse(env.data.get("session:42"));
+    assert.equal(session.style, "cream_bar");
+    assert.equal(session.captionAccent, "pink");
     session.sources = [{ fileId: "source" }];
     env.data.set("session:42", JSON.stringify(session));
     await sendUpdate(env, { message: { from: { id: 42 }, chat: { id: 42 }, text: "собери" } });
     const job = [...env.data.entries()].filter(([key]) => key.startsWith("job:")).map(([, value]) => JSON.parse(value))[0];
-    assert.equal(job.style, "karaoke_pink");
+    assert.equal(job.style, "cream_bar");
     assert.equal(job.plateOpacity, 40);
     assert.equal(job.captionFont, "oswald");
+    assert.equal(job.captionAccent, "pink");
   } finally {
     globalThis.fetch = oldFetch;
   }
