@@ -36,7 +36,7 @@ Dropbox-референсы показывают отдельно: речь-си�
 
 ## Проверки и разработка
 
-В Cloudflare уже была опубликована предыдущая версия Worker (31 октября 2026 года). Описанные здесь локальные изменения от 17 ноября — шесть новых карточек стилей, фото-примеры для `/styles` и `/karaoke-color` — ещё не загружены в GitHub `main` и не развернуты в Cloudflare. Не считайте их включёнными в живом боте до отдельной публикации и Telegram-проверки.
+Изменения опубликованы в GitHub `main`, коммит `0d0f889` (`Add six subtitle styles and karaoke color control`). Cloudflare Worker `reelbot-gateway` обновлён 19 ноября 2026 года; deployment ID: `a7b8a467-b8e4-4cde-9a2c-0a02421cf4e0`. `/health` вернул HTTP 200 и `storageConfigured: true`; настройки показывают сохранённые KV-привязку `STATE` и секреты. Команды `/styles`, `/karaoke-color` и `/font` пока не проверены отправкой сообщений в живой Telegram-чат.
 
 - `python -m py_compile runner.py` — синтаксис runner.
 - `node --check cloudflare/reelbot-gateway.js` — синтаксис Worker.
