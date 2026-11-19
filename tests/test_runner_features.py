@@ -71,6 +71,46 @@ class CaptionPositionTests(unittest.TestCase):
         self.assertNotIn("\\p1\\bord0\\shad0", ass)
 
 
+class DropboxCaptionStyleTests(unittest.TestCase):
+    def setUp(self):
+        self.groups = [{
+            "start": 0.2,
+            "end": 1.8,
+            "words": ["Я", "нашла", "способ", "показать", "результат."],
+        }]
+
+    def test_dropbox_styles_group_no_more_than_three_words(self):
+        tokens = ["первое", "слово", "здесь", "четвёртое", "слово", "здесь"]
+        segment = {
+            "start": 0.0,
+            "end": 2.0,
+            "text": " ".join(tokens),
+            "words": [{"word": word, "start": index * 0.30, "end": index * 0.30 + 0.22}
+                      for index, word in enumerate(tokens)],
+        }
+        groups = runner.group_words([segment], style_id="glass")
+        self.assertEqual([len(group["words"]) for group in groups], [3, 3])
+        self.assertLessEqual(max(len(group["words"]) for group in groups), 3)
+        self.assertLessEqual(groups[0]["end"], groups[1]["start"])
+
+    def test_glass_uses_dropbox_dark_panel_and_bold_selected_font(self):
+        ass = runner.make_ass(self.groups, "glass", font_id="oswald")
+        base_style = next(line for line in ass.splitlines() if line.startswith("Style: Base,"))
+        self.assertIn("Style: Base,Oswald,58,", base_style)
+        self.assertEqual(base_style.split(",")[7], "-1")
+        self.assertIn("&H66202020", base_style)
+
+    def test_fuchsia_olive_echo_and_mixed_keep_their_distinct_treatments(self):
+        fuchsia = runner.make_ass(self.groups, "fuchsia")
+        olive = runner.make_ass(self.groups, "olive")
+        echo = runner.make_ass(self.groups, "echo")
+        mixed = runner.make_ass(self.groups, "mixed")
+        self.assertIn("&H0DA34FFF", fuchsia)
+        self.assertIn("&H0D9AD5C6", olive)
+        self.assertIn(r"\alpha&H99&", echo)
+        self.assertIn(r"\1c&HA34FFF&", mixed)
+
+
 class CaptionEditTests(unittest.TestCase):
     def test_edit_changes_only_nearest_caption_and_keeps_timing(self):
         groups = [

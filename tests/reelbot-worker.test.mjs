@@ -181,7 +181,7 @@ test("camera, speed and filter selections are stored in a new edit job", async (
   }
 });
 
-test("six distinct caption styles and karaoke color reach the queued render job", async () => {
+test("six Dropbox caption styles, custom opacity and font reach the queued render job", async () => {
   const env = makeEnv();
   const sent = [];
   const oldFetch = globalThis.fetch;
@@ -193,30 +193,59 @@ test("six distinct caption styles and karaoke color reach the queued render job"
     await sendUpdate(env, { message: { from: { id: 42 }, chat: { id: 42 }, text: "/styles" } });
     assert.equal(sent[0].media.length, 6);
     assert.deepEqual(sent[0].media.map((item) => item.media.split("/").pop()), [
-      "shifted.jpg", "clean.jpg", "glass_bar.jpg", "cream_bar.jpg", "outlined.jpg", "karaoke_yellow.jpg",
+      "glass.jpg", "powder.jpg", "fuchsia.jpg", "olive.jpg", "echo.jpg", "mixed.jpg",
     ]);
     const styleMenu = sent.find((message) => message.reply_markup?.inline_keyboard);
     const styleButtons = styleMenu.reply_markup.inline_keyboard.flat();
     assert.equal(styleButtons.length, 6);
     assert.deepEqual(styleButtons.map((button) => button.callback_data), [
-      "style:shifted", "style:clean", "style:glass_bar", "style:cream_bar", "style:outlined", "style:karaoke_yellow",
+      "style:glass", "style:powder", "style:fuchsia", "style:olive", "style:echo", "style:mixed",
     ]);
-    await sendUpdate(env, { callback_query: { id: "st1", from: { id: 42 }, message: { chat: { id: 42 } }, data: "style:cream_bar" } });
+    const initialSession = JSON.parse(env.data.get("session:42"));
+    assert.equal(initialSession.style, "glass");
+    assert.equal(initialSession.plateOpacity, null);
+    assert.equal(initialSession.captionPosition, "bottom");
+    await sendUpdate(env, { callback_query: { id: "st1", from: { id: 42 }, message: { chat: { id: 42 } }, data: "style:powder" } });
     await sendUpdate(env, { callback_query: { id: "op1", from: { id: 42 }, message: { chat: { id: 42 } }, data: "plate-opacity:40" } });
     await sendUpdate(env, { callback_query: { id: "fo1", from: { id: 42 }, message: { chat: { id: 42 } }, data: "caption-font:oswald" } });
     await sendUpdate(env, { callback_query: { id: "ac1", from: { id: 42 }, message: { chat: { id: 42 } }, data: "caption-accent:pink" } });
     await sendUpdate(env, { message: { from: { id: 42 }, chat: { id: 42 }, text: "/new" } });
     const session = JSON.parse(env.data.get("session:42"));
-    assert.equal(session.style, "cream_bar");
+    assert.equal(session.style, "powder");
     assert.equal(session.captionAccent, "pink");
     session.sources = [{ fileId: "source" }];
     env.data.set("session:42", JSON.stringify(session));
     await sendUpdate(env, { message: { from: { id: 42 }, chat: { id: 42 }, text: "собери" } });
     const job = [...env.data.entries()].filter(([key]) => key.startsWith("job:")).map(([, value]) => JSON.parse(value))[0];
-    assert.equal(job.style, "cream_bar");
+    assert.equal(job.style, "powder");
     assert.equal(job.plateOpacity, 40);
     assert.equal(job.captionFont, "oswald");
     assert.equal(job.captionAccent, "pink");
+    assert.equal(job.captionPosition, "bottom");
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+});
+
+test("/styles migrates old default opacity and obsolete styles to Dropbox Glass", async () => {
+  const env = makeEnv({
+    "session:42": JSON.stringify({ sources: [], inserts: [], plates: [], style: "shifted", plateOpacity: 60, captionPosition: "auto" }),
+  });
+  const sent = [];
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    sent.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }));
+  };
+  try {
+    await sendUpdate(env, { message: { from: { id: 42 }, chat: { id: 42 }, text: "/styles" } });
+    const session = JSON.parse(env.data.get("session:42"));
+    assert.equal(session.style, "glass");
+    assert.equal(session.plateOpacity, null);
+    assert.equal(session.captionPosition, "bottom");
+    const menu = sent.find((message) => message.reply_markup?.inline_keyboard);
+    assert.match(menu.text, /стили из Dropbox/);
+    assert.match(menu.text, /выбрала Glass/);
   } finally {
     globalThis.fetch = oldFetch;
   }

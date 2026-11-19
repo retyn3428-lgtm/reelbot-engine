@@ -28,17 +28,18 @@ const VIDEO_FILTERS = {
 const WEBHOOK_MARKER = "config:webhook-active-v3";
 
 const CAPTION_STYLES = {
-  1: { id: "shifted", label: "Бордовая со сдвигом" },
-  2: { id: "clean", label: "Белый текст без фона" },
-  3: { id: "glass_bar", label: "Тёмная стеклянная плашка" },
-  4: { id: "cream_bar", label: "Светлая кремовая плашка" },
-  5: { id: "outlined", label: "Белый текст с розовой обводкой" },
-  6: { id: "karaoke_yellow", label: "Караоке — активное слово" },
+  1: { id: "glass", label: "Glass — тёмное стекло", description: "Тёмная плашка, 60%" },
+  2: { id: "powder", label: "Powder — пудровый", description: "Пудровая плашка, 95%" },
+  3: { id: "fuchsia", label: "Fuchsia — фуксия", description: "Розовые ключевые блоки" },
+  4: { id: "olive", label: "Olive — оливковый", description: "Светло-оливковые ключевые блоки" },
+  5: { id: "echo", label: "Echo — двойной текст", description: "Бледная копия над основным текстом" },
+  6: { id: "mixed", label: "Mixed — цветное первое слово", description: "Розовый и жёлтый чередуются" },
 };
-const DEFAULT_STYLE = "shifted";
-const LEGACY_STYLES = new Set(["glass", "powder", "fuchsia", "olive", "echo", "mixed", "karaoke_pink", "karaoke_red"]);
+const DEFAULT_STYLE = "glass";
+const LEGACY_STYLES = new Set(["shifted", "clean", "glass_bar", "cream_bar", "outlined", "karaoke_yellow", "karaoke_pink", "karaoke_red"]);
 const PLATE_OPACITY_OPTIONS = [20, 30, 40, 50, 60, 70, 80];
-const DEFAULT_PLATE_OPACITY = 60;
+const DEFAULT_PLATE_OPACITY = null;
+const DEFAULT_CAPTION_POSITION = "bottom";
 const CAPTION_FONTS = { inter: "Inter", montserrat: "Montserrat", oswald: "Oswald" };
 const DEFAULT_CAPTION_FONT = "montserrat";
 const CAPTION_ACCENTS = { yellow: { label: "Жёлтый", color: "FFD84D" }, pink: { label: "Розовый", color: "FF4FA3" }, red: { label: "Красный", color: "F04452" } };
@@ -46,6 +47,18 @@ const DEFAULT_CAPTION_ACCENT = "yellow";
 const CAPTION_STYLE_PREVIEW_BASE = "https://raw.githubusercontent.com/retyn3428-lgtm/reelbot-engine/main/assets/caption-previews";
 const styleById = (id) => Object.values(CAPTION_STYLES).find((item) => item.id === id);
 const normalizeStyleId = (id) => styleById(id)?.id || DEFAULT_STYLE;
+const normalizePlateOpacity = (session) => {
+  const value = Number(session?.plateOpacity);
+  if (!PLATE_OPACITY_OPTIONS.includes(value)) return DEFAULT_PLATE_OPACITY;
+  if (session?.plateOpacityExplicit === true || value !== 60) return value;
+  return DEFAULT_PLATE_OPACITY;
+};
+const normalizeCaptionPosition = (session) => {
+  const value = session?.captionPosition;
+  if (!Object.hasOwn(CAPTION_POSITIONS, value)) return DEFAULT_CAPTION_POSITION;
+  if (value === "auto" && session?.captionPositionExplicit !== true) return DEFAULT_CAPTION_POSITION;
+  return value;
+};
 const captionPositionKeyboard = (active) => ({ inline_keyboard: [[
   { text: `${active === "auto" ? "✓ " : ""}Автоматически`, callback_data: "caption-position:auto" },
   { text: `${active === "bottom" ? "✓ " : ""}Внизу`, callback_data: "caption-position:bottom" },
@@ -95,7 +108,7 @@ async function sendCaptionStylePreviews(env, chatId) {
   const media = Object.values(CAPTION_STYLES).map((item, index) => ({
     type: "photo",
     media: `${CAPTION_STYLE_PREVIEW_BASE}/${item.id}.jpg`,
-    caption: `${index + 1}. ${item.label}${item.id === "karaoke_yellow" ? "\nЦвет активного слова: /karaoke-color" : ""}`,
+    caption: `${index + 1}. ${item.label}\n${item.description}`,
   }));
   try {
     await telegram(env, "sendMediaGroup", { chat_id: chatId, media });
@@ -159,10 +172,12 @@ async function getJobs(env, chatId) {
 const freshSession = (previous) => ({
   sources: [], inserts: [], plates: [], createdAt: Date.now(),
   style: normalizeStyleId(previous?.style),
-  plateOpacity: PLATE_OPACITY_OPTIONS.includes(Number(previous?.plateOpacity)) ? Number(previous.plateOpacity) : DEFAULT_PLATE_OPACITY,
+  plateOpacity: normalizePlateOpacity(previous),
+  plateOpacityExplicit: normalizePlateOpacity(previous) !== null,
   captionFont: Object.hasOwn(CAPTION_FONTS, previous?.captionFont) ? previous.captionFont : DEFAULT_CAPTION_FONT,
   captionAccent: Object.hasOwn(CAPTION_ACCENTS, previous?.captionAccent) ? previous.captionAccent : DEFAULT_CAPTION_ACCENT,
-  captionPosition: previous?.captionPosition || "auto",
+  captionPosition: normalizeCaptionPosition(previous),
+  captionPositionExplicit: previous?.captionPositionExplicit === true || previous?.captionPosition === "top" || previous?.captionPosition === "bottom",
   cameraMode: previous?.cameraMode || "standard",
   speed: previous?.speed || 1,
   colorFilter: previous?.colorFilter || "original",
@@ -313,9 +328,12 @@ async function handleTelegram(request, env) {
     if (selected) {
       session ||= freshSession();
       session.style = selected.id;
+      session.plateOpacity = DEFAULT_PLATE_OPACITY;
+      session.plateOpacityExplicit = false;
       await saveSession(env, chatId, session);
       await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: `Выбрано: ${selected.label}` });
-      await sendMessage(env, chatId, `Стиль выбран: ${selected.label}. Блоки субтитров будут одного цвета; подсветка движется по произносимым словам, если она есть в выбранном стиле.`);
+      const detail = selected.id === "mixed" ? "Первое слово блока будет розовым и жёлтым по очереди." : selected.id === "fuchsia" || selected.id === "olive" ? "Первый и затем каждый третий блок с длинным словом получит цветную плашку." : selected.id === "echo" ? "Над основным текстом будет лёгкая полупрозрачная копия." : "Плашка, цвет и прозрачность применяются по выбранному стилю.";
+      await sendMessage(env, chatId, `Стиль выбран: ${selected.label}. ${detail} Шрифт: /font.`);
     }
     return new Response("ok");
   }
@@ -324,6 +342,7 @@ async function handleTelegram(request, env) {
     if (PLATE_OPACITY_OPTIONS.includes(value)) {
       session ||= freshSession();
       session.plateOpacity = value;
+      session.plateOpacityExplicit = true;
       await saveSession(env, chatId, session);
       await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: `Плотность плашки: ${value}%` });
       await sendMessage(env, chatId, `Плотность заливки плашки: ${value}%. Чем меньше процент, тем прозрачнее плашка.`, plateOpacityKeyboard(value));
@@ -357,6 +376,7 @@ async function handleTelegram(request, env) {
     if (Object.hasOwn(CAPTION_POSITIONS, position)) {
       session ||= freshSession();
       session.captionPosition = position;
+      session.captionPositionExplicit = true;
       await saveSession(env, chatId, session);
       await telegram(env, "answerCallbackQuery", { callback_query_id: update.callback_query.id, text: CAPTION_POSITIONS[position] });
       await sendMessage(env, chatId, `Положение субтитров: ${CAPTION_POSITIONS[position]}.`, captionPositionKeyboard(position));
@@ -453,10 +473,12 @@ async function handleTelegram(request, env) {
       sources: original.sources, reference: original.reference || null,
       inserts: original.inserts || [], plates: original.plates || [],
       style: normalizeStyleId(original.style),
-      plateOpacity: PLATE_OPACITY_OPTIONS.includes(Number(original.plateOpacity)) ? Number(original.plateOpacity) : DEFAULT_PLATE_OPACITY,
+      plateOpacity: normalizePlateOpacity(original),
+      plateOpacityExplicit: normalizePlateOpacity(original) !== null,
       captionFont: Object.hasOwn(CAPTION_FONTS, original.captionFont) ? original.captionFont : DEFAULT_CAPTION_FONT,
       captionAccent: Object.hasOwn(CAPTION_ACCENTS, original.captionAccent) ? original.captionAccent : DEFAULT_CAPTION_ACCENT,
-      captionPosition: original.captionPosition || "auto",
+      captionPosition: normalizeCaptionPosition(original),
+      captionPositionExplicit: original.captionPositionExplicit === true || original.captionPosition === "top" || original.captionPosition === "bottom",
       cameraMode: original.cameraMode || "standard", speed: original.speed || 1,
       colorFilter: original.colorFilter || "original",
       captionEdits: original.captionEdits || [], editingJobId: original.id,
@@ -542,7 +564,8 @@ async function handleTelegram(request, env) {
 
   if (normalized === "/caption-position" || normalized === "/caption_position" || normalized === "положение субтитров") {
     session ||= freshSession();
-    const position = session.captionPosition || "auto";
+    const position = normalizeCaptionPosition(session);
+    session.captionPosition = position;
     await saveSession(env, chatId, session);
     await sendMessage(env, chatId, `Сейчас: ${CAPTION_POSITIONS[position]}. Автоматический режим старается поставить подписи в свободную зону кадра; при неуверенном распознавании лица остаётся обычное положение.`, captionPositionKeyboard(position));
     return new Response("ok");
@@ -550,10 +573,11 @@ async function handleTelegram(request, env) {
 
   if (["/plate-opacity", "прозрачность плашки"].includes(normalized)) {
     session ||= freshSession();
-    const opacity = PLATE_OPACITY_OPTIONS.includes(Number(session.plateOpacity)) ? Number(session.plateOpacity) : DEFAULT_PLATE_OPACITY;
+    const opacity = normalizePlateOpacity(session);
     session.plateOpacity = opacity;
+    session.plateOpacityExplicit = opacity !== null;
     await saveSession(env, chatId, session);
-    await sendMessage(env, chatId, `Плотность заливки плашки: ${opacity}%. 20% почти прозрачная, 80% плотная. Применяется к бордовой, тёмной и кремовой плашкам.`, plateOpacityKeyboard(opacity));
+    await sendMessage(env, chatId, `${opacity === null ? "Сейчас прозрачность задаётся выбранным стилем." : `Дополнительная прозрачность: ${opacity}%.`} Можно переопределить её значением от 20% до 80%; новый стиль возвращает свои исходные цвета и прозрачность.`, plateOpacityKeyboard(opacity));
     return new Response("ok");
   }
 
@@ -596,7 +620,7 @@ async function handleTelegram(request, env) {
   }
 
   if (normalized === "/start" || normalized === "/help") {
-    await sendMessage(env, chatId, "Привет! Я закрытый ReelBot.\n\n/new — новый проект\n/styles — один из шести разных видов субтитров\n/plate-opacity — прозрачность плашки 20–80%\n/font — шрифт Inter, Montserrat или Oswald\n/karaoke-color — цвет активного слова: жёлтый, розовый или красный\n/caption-position — место субтитров\n/motion — движение камеры: обычное, без движения или усиленное\n/speed — скорость от ×1 до ×1,5\n/filter — цветовой вариант\n/ref — референс движения камеры\n/insert — добавить свою GIF или видео\n/findinsert тема — найти GIF/видео со свободной лицензией\n/plate — текстовая плашка\n/layers — посмотреть слои проекта\n/undo — отменить последний слой\n/remove layer 2 — убрать один слой\n/edit RB-НОМЕР — открыть готовый проект (до 7 дней)\n/caption-edit 12 текст — исправить одну фразу\n/clear — убрать все вставки и плашки\n/script тема — придумать хуки и сценарий\n\nВ /styles: бордовая плашка со сдвигом; белый текст без фона; тёмная стеклянная плашка; светлая кремовая плашка; белый текст с розовой обводкой; karaoke, где цветом выделяется текущее произносимое слово. Цвет karaoke меняется отдельно через /karaoke-color.\n\nПришли видео (до 20 МБ) или ссылки Dropbox/OneDrive (до 20 штук), затем напиши «собери». Бот удалит длинные паузы, добавит выбранные субтитры, применит движение и обработку цвета, нормализует звук.\n\nВставка: «вставка 5» и затем GIF/видео — поместить на 5-ю секунду готового ролика. Можно указать длительность: «вставка 5 3». Слои можно менять перед сборкой.\nПоиск: «/findinsert реакция удивление». Источник показывает небольшие GIF/видео с лицензиями CC0, Public Domain или CC BY. Это не каталог всех мемов и не разрешение на любые современные кинофрагменты.\nПравка готового ролика: «/edit RB-НОМЕР», затем «/caption-edit 12 Нужная фраза» или команды для слоёв. При обновлении исходное видео будет обработано заново; постоянного предпросмотра отдельных слоёв пока нет.\nСценарий: «/script тема ролика». Бот предлагает оригинальные начала и структуру, не копирует чужие фразы и не заявляет, что искал в Instagram.");
+    await sendMessage(env, chatId, "Привет! Я закрытый ReelBot.\n\n/new — новый проект\n/styles — шесть субтитровых стилей из Dropbox\n/plate-opacity — при желании переопределить прозрачность плашки (20–80%)\n/font — выбрать Inter, Montserrat или Oswald\n/caption-position — внизу, сверху или автоматически\n/motion — обычное, без движения или усиленное движение камеры\n/speed — скорость от ×1 до ×1,5\n/filter — цветовой вариант\n/ref — референс движения камеры\n/insert — добавить свою GIF или видео\n/findinsert тема — найти GIF/видео со свободной лицензией\n/plate — текстовая плашка\n/layers — посмотреть слои проекта\n/undo — отменить последний слой\n/remove layer 2 — убрать один слой\n/edit RB-НОМЕР — открыть готовый проект (до 7 дней)\n/caption-edit 12 текст — исправить одну фразу\n/clear — убрать все вставки и плашки\n/script тема — придумать хуки и сценарий\n\nВ /styles: Glass — тёмная стеклянная плашка; Powder — пудровая; Fuchsia и Olive — цветные ключевые блоки; Echo — двойной текст; Mixed — цветное первое слово. Для этих стилей субтитры делятся на короткие блоки до трёх слов. По умолчанию позиция — снизу, а прозрачность берётся из выбранного стиля. Шрифт можно менять отдельно через /font.\n\nПришли видео (до 20 МБ) или ссылки Dropbox/OneDrive (до 20 штук), затем напиши «собери». Бот уберёт длинные паузы, добавит выбранные субтитры, применит движение и обработку цвета, нормализует звук.\n\nВставка: «вставка 5» и затем GIF/видео — поместить на 5-ю секунду готового ролика. Можно указать длительность: «вставка 5 3». Слои можно менять перед сборкой.\nПоиск: «/findinsert реакция удивление». Источник показывает небольшие GIF/видео с лицензиями CC0, Public Domain или CC BY. Это не каталог всех мемов и не разрешение на любые современные кинофрагменты.\nПравка готового ролика: «/edit RB-НОМЕР», затем «/caption-edit 12 Нужная фраза» или команды для слоёв. При обновлении исходное видео будет обработано заново; постоянного предпросмотра отдельных слоёв пока нет.\nСценарий: «/script тема ролика». Бот предлагает оригинальные начала и структуру, не копирует чужие фразы и не заявляет, что искал в Instagram.");
     return new Response("ok");
   }
 
@@ -604,18 +628,20 @@ async function handleTelegram(request, env) {
     session ||= freshSession();
     const replacedOldStyle = LEGACY_STYLES.has(session.style);
     session.style = normalizeStyleId(session.style);
-    session.plateOpacity = PLATE_OPACITY_OPTIONS.includes(Number(session.plateOpacity)) ? Number(session.plateOpacity) : DEFAULT_PLATE_OPACITY;
+    session.plateOpacity = replacedOldStyle ? DEFAULT_PLATE_OPACITY : normalizePlateOpacity(session);
+    session.plateOpacityExplicit = session.plateOpacity !== null;
     session.captionFont = Object.hasOwn(CAPTION_FONTS, session.captionFont) ? session.captionFont : DEFAULT_CAPTION_FONT;
+    session.captionPosition = normalizeCaptionPosition(session);
     await saveSession(env, chatId, session);
-    const note = replacedOldStyle ? "Старый вариант с чередующимися цветными плашками отключён, чтобы субтитры выглядели ровно. Перевела проект на бордовую плашку со сдвигом.\n\n" : "";
+    const note = replacedOldStyle ? "Обновила набор: теперь доступны стили из Dropbox. Для этого проекта выбрала Glass.\n\n" : "";
     await sendCaptionStylePreviews(env, chatId);
-    await sendMessage(env, chatId, `${note}Выбери один из шести разных видов:\n• Бордовая плашка со сдвигом.\n• Белый текст без фона.\n• Тёмная стеклянная плашка.\n• Светлая кремовая плашка.\n• Белый текст с розовой обводкой.\n• Karaoke: фраза белая, цветом отмечается произносимое слово.\n\nСейчас: ${styleById(session.style)?.label}. Прозрачность плашек: /plate-opacity. Шрифт: /font. Цвет слова: /karaoke-color.`, captionStyleKeyboard(session.style));
+    await sendMessage(env, chatId, `${note}Выбери один из шести стилей из Dropbox:\n• Glass — тёмная полупрозрачная плашка.\n• Powder — пудровая почти непрозрачная плашка.\n• Fuchsia и Olive — цветные ключевые блоки.\n• Echo — двойной текст.\n• Mixed — первое слово блока меняет цвет.\n\nСейчас: ${styleById(session.style)?.label}. Шрифт: /font. Прозрачность можно настроить отдельно: /plate-opacity. Положение: /caption-position.`, captionStyleKeyboard(session.style));
     return new Response("ok");
   }
 
   if (normalized === "/new" || normalized === "новый монтаж") {
     await saveSession(env, chatId, freshSession(session));
-    await sendMessage(env, chatId, "Новый проект готов. Отправь исходное видео (до 20 МБ) или ссылку Dropbox/OneDrive. Можно несколько, затем напиши «собери». Стиль: /styles. Прозрачность плашки: /plate-opacity. Шрифт: /font. Цвет karaoke-слова: /karaoke-color. Положение: /caption-position. Движение: /motion. Скорость: /speed. Цвет видео: /filter. Референс камеры: /ref. Вставка: /insert или /findinsert тема. Плашка: /plate. Слои: /layers, /undo, /remove layer 2.");
+    await sendMessage(env, chatId, "Новый проект готов. Отправь исходное видео (до 20 МБ) или ссылку Dropbox/OneDrive. Можно несколько, затем напиши «собери». По умолчанию: Glass, короткие блоки субтитров и нижнее положение. Стиль: /styles. Шрифт: /font. Прозрачность по стилю или настройка: /plate-opacity. Положение: /caption-position. Движение: /motion. Скорость: /speed. Цвет видео: /filter. Референс камеры: /ref. Вставка: /insert или /findinsert тема. Плашка: /plate. Слои: /layers, /undo, /remove layer 2.");
     return new Response("ok");
   }
 
@@ -813,7 +839,9 @@ async function handleTelegram(request, env) {
     }
     session ||= freshSession();
     session.style = normalizeStyleId(session.style);
-    session.plateOpacity = PLATE_OPACITY_OPTIONS.includes(Number(session.plateOpacity)) ? Number(session.plateOpacity) : DEFAULT_PLATE_OPACITY;
+    session.plateOpacity = normalizePlateOpacity(session);
+    session.plateOpacityExplicit = session.plateOpacity !== null;
+    session.captionPosition = normalizeCaptionPosition(session);
     session.captionFont = Object.hasOwn(CAPTION_FONTS, session.captionFont) ? session.captionFont : DEFAULT_CAPTION_FONT;
     session.sources ||= [];
     if (!session.awaitingReference && session.sources.length >= MAX_SOURCES) {
@@ -837,13 +865,15 @@ async function handleTelegram(request, env) {
     }
     const id = `RB-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
     const style = normalizeStyleId(session.style);
-    const plateOpacity = PLATE_OPACITY_OPTIONS.includes(Number(session.plateOpacity)) ? Number(session.plateOpacity) : DEFAULT_PLATE_OPACITY;
+    const plateOpacity = normalizePlateOpacity(session);
     const captionFont = Object.hasOwn(CAPTION_FONTS, session.captionFont) ? session.captionFont : DEFAULT_CAPTION_FONT;
     const captionAccent = Object.hasOwn(CAPTION_ACCENTS, session.captionAccent) ? session.captionAccent : DEFAULT_CAPTION_ACCENT;
-    const job = { id, chatId, sources: session.sources, reference: session.reference || null, inserts: session.inserts || [], plates: session.plates || [], style, plateOpacity, captionFont, captionAccent, captionPosition: session.captionPosition || "auto", cameraMode: session.cameraMode || "standard", speed: session.speed || 1, colorFilter: session.colorFilter || "original", captionEdits: session.captionEdits || [], revisionOf: session.editingJobId || null, status: "queued", createdAt: Date.now(), attempts: 0 };
+    const captionPosition = normalizeCaptionPosition(session);
+    const opacityLabel = plateOpacity === null ? "по выбранному стилю" : `${plateOpacity}%`;
+    const job = { id, chatId, sources: session.sources, reference: session.reference || null, inserts: session.inserts || [], plates: session.plates || [], style, plateOpacity, captionFont, captionAccent, captionPosition, cameraMode: session.cameraMode || "standard", speed: session.speed || 1, colorFilter: session.colorFilter || "original", captionEdits: session.captionEdits || [], revisionOf: session.editingJobId || null, status: "queued", createdAt: Date.now(), attempts: 0 };
     await env.STATE.put(`job:${id}`, JSON.stringify(job), { expirationTtl: JOB_TTL });
     await env.STATE.put(sessionKey, JSON.stringify({ ...freshSession(session) }), { expirationTtl: SESSION_TTL });
-    await sendMessage(env, chatId, `Задача ${id} сохранена${job.revisionOf ? ` как обновление ${job.revisionOf}` : ""}. Стиль: ${styleById(style)?.label}; шрифт: ${CAPTION_FONTS[captionFont]}; заливка плашки: ${plateOpacity}%.${job.reference ? " Зум возьму из референса." : ""}${job.inserts.length ? ` Вставок: ${job.inserts.length}.` : ""}${job.plates.length ? ` Плашек: ${job.plates.length}.` : ""}${job.captionEdits.length ? ` Исправлений субтитров: ${job.captionEdits.length}.` : ""} Монтаж стартует в течение нескольких минут, готовый ролик пришлю сюда. Статус: /queue.`);
+    await sendMessage(env, chatId, `Задача ${id} сохранена${job.revisionOf ? ` как обновление ${job.revisionOf}` : ""}. Стиль: ${styleById(style)?.label}; шрифт: ${CAPTION_FONTS[captionFont]}; прозрачность плашки: ${opacityLabel}.${job.reference ? " Зум возьму из референса." : ""}${job.inserts.length ? ` Вставок: ${job.inserts.length}.` : ""}${job.plates.length ? ` Плашек: ${job.plates.length}.` : ""}${job.captionEdits.length ? ` Исправлений субтитров: ${job.captionEdits.length}.` : ""} Монтаж стартует в течение нескольких минут, готовый ролик пришлю сюда. Статус: /queue.`);
     return new Response("ok");
   }
 
@@ -977,7 +1007,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ status: "ok", service: "reelbot-gateway", version: 4, storageConfigured: Boolean(env.STATE), privateBot: true });
+      return json({ status: "ok", service: "reelbot-gateway", version: 5, storageConfigured: Boolean(env.STATE), privateBot: true });
     }
     try {
       if (url.pathname === "/telegram" && request.method === "POST") return await handleTelegram(request, env);

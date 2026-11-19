@@ -40,7 +40,7 @@ DEFAULT_CAPTION_FONT = "montserrat"
 CAPTION_ACCENTS = {"yellow": "FFD84D", "pink": "FF4FA3", "red": "F04452"}
 
 STYLES = {
-    "glass": dict(label="Glass", plate="000000", op=0.6, text="FFFFFF", key="none", bold=False),
+    "glass": dict(label="Glass", plate="202020", op=0.6, text="FFFFFF", key="none", bold=True),
     "powder": dict(label="Powder", plate="E8B8C8", op=0.95, text="FFFFFF", key="none"),
     "fuchsia": dict(label="Fuchsia", plate="181018", op=0.75, text="FFFFFF", key="plate", key_plate="FF4FA3", key_text="FFFFFF"),
     "olive": dict(label="Olive", plate="2F3924", op=0.85, text="FFFFFF", key="plate", key_plate="C6D59A", key_text="2F3924"),
@@ -243,6 +243,8 @@ CAPTION_MAX_SECONDS = 3.0
 CAPTION_PAUSE_SECONDS = 0.65
 CAPTION_MIN_SECONDS = 0.35
 CAPTION_MIN_GROUP_WORDS = 3
+DROPBOX_CAPTION_MAX_WORDS = 3
+DROPBOX_CAPTION_STYLES = frozenset({"glass", "powder", "fuchsia", "olive", "echo", "mixed"})
 CAPTION_MAX_LINE_CHARS = 30
 CAPTION_WEAK_WORDS = {
     "а", "и", "но", "что", "чтобы", "к", "ко", "в", "во", "на", "с", "со", "по", "за",
@@ -328,8 +330,8 @@ def _caption_segment_words(seg):
     return result
 
 
-def group_words(segments):
-    """Группирует речь в читаемые фразы: до 9 слов, обычно 6–9 слов и 2–3 секунды."""
+def group_words(segments, style_id=None):
+    """Старые пресеты используют фразовую группировку; стили Dropbox — до трёх слов."""
     words = []
     for seg in segments:
         words.extend(_caption_segment_words(seg))
@@ -356,6 +358,25 @@ def group_words(segments):
             return
         groups.append(make_group(current))
         current.clear()
+
+    if style_id in DROPBOX_CAPTION_STYLES:
+        for word in words:
+            if current:
+                previous = current[-1]
+                gap = max(0.0, word["start"] - previous["end"])
+                if _caption_sentence_end(previous["word"]) or gap >= CAPTION_PAUSE_SECONDS:
+                    flush()
+            current.append(word)
+            if len(current) >= DROPBOX_CAPTION_MAX_WORDS or _caption_sentence_end(word["word"]):
+                flush()
+        flush()
+        for i, group in enumerate(groups[:-1]):
+            next_start = groups[i + 1]["start"]
+            if next_start > group["start"]:
+                group["end"] = min(group["end"], next_start)
+        for group in groups:
+            group.pop("_items", None)
+        return groups
 
     for word in words:
         if not current:
@@ -667,7 +688,7 @@ def active_word_events(group, wrapped, st, anchor=None):
 
 
 CAPTION_ANCHORS = {
-    "bottom": (540, 1450),
+    "bottom": (540, 1490),
     "top": (540, 350),
     "top_left": (300, 420),
     "top_right": (780, 420),
@@ -1077,9 +1098,9 @@ def build_filter_graph(planned, base_chain, ass, fonts_dir=None):
 
 
 # ---------- Финальная сборка ----------
-def render(path, segments, workdir, style_id, profile, inserts=None, plates=None, caption_position="auto", caption_edits=None,
+def render(path, segments, workdir, style_id, profile, inserts=None, plates=None, caption_position="bottom", caption_edits=None,
            camera_mode="standard", color_filter="original", plate_opacity=None, font_id=None, caption_accent=None):
-    groups = apply_caption_edits(group_words(segments), caption_edits or [])
+    groups = apply_caption_edits(group_words(segments, style_id=style_id), caption_edits or [])
     total = probe_duration(path)
     positions = detect_caption_positions(path, groups, caption_position)
     ass = os.path.join(workdir, "captions.ass")
@@ -1327,7 +1348,7 @@ def process(job):
         gw("/runner/complete", json={"jobId": job["id"]})
         return
 
-    style = job.get("style") if job.get("style") in STYLES else "shifted"
+    style = job.get("style") if job.get("style") in STYLES else "glass"
     workdir = tempfile.mkdtemp(prefix="reelbot-")
     try:
         sources = job.get("sources") or []
@@ -1359,7 +1380,7 @@ def process(job):
                 print("вставка не скачалась:", exc)
                 say(chat, "Одну вставку скачать не удалось, монтирую без неё. Проверь, что ссылка прямая и открыта всем.")
         result = render(working, segments, workdir, style, profile, inserts, job.get("plates") or [],
-                        job.get("captionPosition", "auto"), job.get("captionEdits") or [],
+                        job.get("captionPosition", "bottom"), job.get("captionEdits") or [],
                         job.get("cameraMode", "standard"), job.get("colorFilter", "original"),
                         job.get("plateOpacity"), job.get("captionFont"), job.get("captionAccent"))
         with open(result, "rb") as f:
